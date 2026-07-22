@@ -24,7 +24,7 @@ SqueezeParseMini renders borderless, always-on-top bar charts directly on your s
 ## Installation
 
 1. Download `SqueezeParseMini.cs`.
-2. Move the plugin to **C:\Users\USERNAME\AppData\Roaming\Advanced Combat Tracker\Plugins\SqueezeParseMini.cs**.
+2. Move the plugin to `C:\Users\USERNAME\AppData\Roaming\Advanced Combat Tracker\Plugins\SqueezeParseMini.cs`.
 2. In ACT, go to **Plugins → Plugin Listing**, click **Browse**, select the file, and click **Add/Enable Plugin**.
 3. Check the box to enable it. A new **SqueezeParseMini** tab will appear.
 
