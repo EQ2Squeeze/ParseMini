@@ -2875,7 +2875,7 @@ namespace SqueezeParseMini
             {
                 _btnDownloadUpdate.Text = "Up to date (v" + CurrentVersion + ")";
                 _btnDownloadUpdate.ForeColor = Color.LightGreen;
-                _btnDownloadUpdate.Enabled = false;
+                _btnDownloadUpdate.Enabled = true;
             }
             else
             {
