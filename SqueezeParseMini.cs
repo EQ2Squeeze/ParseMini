@@ -2015,7 +2015,7 @@ namespace SqueezeParseMini
     {
         // Bump this with every release you push, and keep version.txt in the
         // repo (see VersionCheckUrl below) in sync with it.
-        private const string CurrentVersion = "1.0.1";
+        private const string CurrentVersion = "1.0.0";
 
         // Fill these in with your actual GitHub repo details once it's set up:
         // - VersionCheckUrl should point at a plain text file containing just
@@ -2063,12 +2063,13 @@ namespace SqueezeParseMini
                 AddWindow(null);
             }
 
-            // Defer until after WinForms has actually laid out the tab content -
-            // during InitPlugin the plugin tab may not have a real size yet.
-            if (pluginScreenSpace.IsHandleCreated)
-                pluginScreenSpace.BeginInvoke(new MethodInvoker(SyncGeneralWidth));
-            else
-                SyncGeneralWidth();
+            // The tab content isn't necessarily laid out yet the moment
+            // InitPlugin runs - a single deferred attempt sometimes lands too
+            // early and never gets retried, leaving General stuck at its
+            // narrow placeholder width (and clipping whatever wrapped into
+            // the rows below the visible area, like the update-check
+            // controls). Keep retrying on a short timer until it succeeds.
+            StartGeneralWidthSyncRetries();
 
             CheckForUpdates();
 
@@ -2085,6 +2086,12 @@ namespace SqueezeParseMini
             {
                 _refreshTimer.Stop();
                 _refreshTimer.Dispose();
+            }
+
+            if (_generalWidthSyncTimer != null)
+            {
+                _generalWidthSyncTimer.Stop();
+                _generalWidthSyncTimer.Dispose();
             }
 
             SaveSettings();
@@ -2181,9 +2188,29 @@ namespace SqueezeParseMini
             var lblFilePath = new Label { Text = "Plugin file path:", AutoSize = true, Margin = new Padding(12, 8, 4, 0) };
             generalFlow.Controls.Add(lblFilePath);
 
-            _txtLocalFilePath = new TextBox { Width = 280, Margin = new Padding(0, 4, 0, 0) };
+            _txtLocalFilePath = new TextBox { Width = 220, Margin = new Padding(0, 4, 4, 0) };
             _txtLocalFilePath.TextChanged += (s, e) => SaveSettings();
             generalFlow.Controls.Add(_txtLocalFilePath);
+
+            var btnBrowsePath = new Button { Text = "Browse...", AutoSize = true, Margin = new Padding(0, 4, 12, 0) };
+            btnBrowsePath.Click += (s, e) =>
+            {
+                using (var dlg = new OpenFileDialog())
+                {
+                    dlg.Filter = "C# source files (*.cs)|*.cs|All files (*.*)|*.*";
+                    dlg.Title = "Locate SqueezeParseMini.cs";
+                    if (!string.IsNullOrEmpty(_txtLocalFilePath.Text) && File.Exists(_txtLocalFilePath.Text))
+                    {
+                        dlg.InitialDirectory = Path.GetDirectoryName(_txtLocalFilePath.Text);
+                        dlg.FileName = Path.GetFileName(_txtLocalFilePath.Text);
+                    }
+                    if (dlg.ShowDialog() == DialogResult.OK)
+                    {
+                        _txtLocalFilePath.Text = dlg.FileName;
+                    }
+                }
+            };
+            generalFlow.Controls.Add(btnBrowsePath);
 
             _generalGroup.Controls.Add(generalFlow);
             generalBand.Controls.Add(_generalGroup);
@@ -2196,21 +2223,51 @@ namespace SqueezeParseMini
         /// a fixed column count (sections wrap into a different number of
         /// columns depending on total content height).
         /// </summary>
-        private void SyncGeneralWidth()
+        private Timer _generalWidthSyncTimer;
+        private int _generalWidthSyncAttempts;
+
+        /// <summary>
+        /// Calls SyncGeneralWidth on a short repeating timer until it
+        /// reports success (or a reasonable attempt cap is hit), instead of
+        /// relying on a single deferred call that can land before the tab
+        /// content has actually been laid out.
+        /// </summary>
+        private void StartGeneralWidthSyncRetries()
         {
-            if (_generalGroup == null || _tabControl.SelectedTab == null) return;
+            _generalWidthSyncAttempts = 0;
+
+            _generalWidthSyncTimer = new Timer { Interval = 250 };
+            _generalWidthSyncTimer.Tick += (s, e) =>
+            {
+                _generalWidthSyncAttempts++;
+                bool succeeded = SyncGeneralWidth();
+
+                if (succeeded || _generalWidthSyncAttempts >= 20)
+                {
+                    _generalWidthSyncTimer.Stop();
+                    _generalWidthSyncTimer.Dispose();
+                    _generalWidthSyncTimer = null;
+                }
+            };
+            _generalWidthSyncTimer.Start();
+        }
+
+        private bool SyncGeneralWidth()
+        {
+            if (_generalGroup == null || _tabControl.SelectedTab == null) return false;
 
             ParseWindowController active = null;
             foreach (ParseWindowController w in _windows)
             {
                 if (w.Page == _tabControl.SelectedTab) { active = w; break; }
             }
-            if (active == null || active.SelfGroupBox == null) return;
+            if (active == null || active.SelfGroupBox == null) return false;
 
             int measuredRight = active.SelfGroupBox.Right;
-            if (measuredRight < 300) return; // not laid out yet - try again later
+            if (measuredRight < 300) return false; // not laid out yet - try again later
 
             _generalGroup.Width = measuredRight + 16;
+            return true;
         }
 
         private ParseWindowController AddWindow(string presetName)
