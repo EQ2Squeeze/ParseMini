@@ -2015,7 +2015,7 @@ namespace SqueezeParseMini
     {
         // Bump this with every release you push, and keep version.txt in the
         // repo (see VersionCheckUrl below) in sync with it.
-        private const string CurrentVersion = "1.0.0";
+        private const string CurrentVersion = "1.0.2";
 
         // Fill these in with your actual GitHub repo details once it's set up:
         // - VersionCheckUrl should point at a plain text file containing just
@@ -2057,10 +2057,27 @@ namespace SqueezeParseMini
 
             BuildRootUI(pluginScreenSpace);
 
+            // Forces the label's actual window handle to exist right away
+            // instead of whenever ACT first paints this tab. Without this,
+            // the background update-check thread's IsHandleCreated guard
+            // (there to avoid a cross-thread Invoke crash) can find no
+            // handle yet on the very first automatic check and silently
+            // drop the result, leaving the label stuck on "Checking...".
+            IntPtr forceHandleCreation = _lblUpdateStatus.Handle;
+
             if (!LoadSettings())
             {
                 // Fresh install / no saved file yet - start with one default window.
                 AddWindow(null);
+            }
+
+            if (string.IsNullOrEmpty(_txtLocalFilePath.Text))
+            {
+                // Best-guess default - most people keep loose-.cs ACT plugins
+                // in ACT's own Plugins folder. Just a starting point: Browse
+                // still works fine if this guess is wrong for someone.
+                _txtLocalFilePath.Text = Path.Combine(
+                    ActGlobals.oFormActMain.AppDataFolder.FullName, "Plugins", "SqueezeParseMini.cs");
             }
 
             // The tab content isn't necessarily laid out yet the moment
