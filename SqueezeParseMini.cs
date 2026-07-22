@@ -2015,7 +2015,7 @@ namespace SqueezeParseMini
     {
         // Bump this with every release you push, and keep version.txt in the
         // repo (see VersionCheckUrl below) in sync with it.
-        private const string CurrentVersion = "1.0.0";
+        private const string CurrentVersion = "1.0.1";
 
         // Fill these in with your actual GitHub repo details once it's set up:
         // - VersionCheckUrl should point at a plain text file containing just
