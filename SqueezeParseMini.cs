@@ -2491,8 +2491,20 @@ namespace SqueezeParseMini
             string path = _txtLocalFilePath.Text;
             if (string.IsNullOrEmpty(path))
             {
-                MessageBox.Show("Enter the path to your SqueezeParseMini.cs file first.", "SqueezeParseMini", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show("Enter or browse to the path for your SqueezeParseMini.cs file first.", "SqueezeParseMini", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
+            }
+
+            // If this points at a folder (e.g. ACT's Plugins folder) rather
+            // than the .cs file itself, write the file into that folder
+            // under its standard name instead of failing - .NET's error for
+            // "tried to write a file to a path that's actually a directory"
+            // is a confusing "Access to the path is denied", not anything
+            // about the folder being wrong.
+            if (Directory.Exists(path))
+            {
+                path = Path.Combine(path, "SqueezeParseMini.cs");
+                _txtLocalFilePath.Text = path;
             }
 
             _btnDownloadUpdate.Enabled = false;
