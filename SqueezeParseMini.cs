@@ -6,7 +6,6 @@ using System.Drawing.Imaging;
 using System.IO;
 using System.Net;
 using System.Runtime.InteropServices;
-using System.Threading;
 using System.Windows.Forms;
 using Advanced_Combat_Tracker;
 
@@ -2022,8 +2021,8 @@ namespace SqueezeParseMini
         // - VersionCheckUrl should point at a plain text file containing just
         //   the version number (e.g. "1.0.1"), nothing else.
         // - DownloadUrl should point at the raw .cs source of the latest release.
-        private const string VersionCheckUrl = "https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/version.txt";
-        private const string DownloadUrl = "https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/SqueezeParseMini.cs";
+        private const string VersionCheckUrl = "https://raw.githubusercontent.com/EQ2Squeeze/ParseMini/main/version.txt";
+        private const string DownloadUrl = "https://raw.githubusercontent.com/EQ2Squeeze/ParseMini/main/SqueezeParseMini.cs";
 
         private Label _pluginStatusText;
         private string _settingsFilePath;
@@ -2369,7 +2368,7 @@ namespace SqueezeParseMini
             _lblUpdateStatus.Text = "Checking...";
             _lblUpdateStatus.ForeColor = Color.Gray;
 
-            ThreadPool.QueueUserWorkItem(delegate
+            System.Threading.ThreadPool.QueueUserWorkItem(delegate
             {
                 string remoteVersion = null;
                 string errorMessage = null;
@@ -2443,7 +2442,7 @@ namespace SqueezeParseMini
             _lblUpdateStatus.Text = "Downloading...";
             _lblUpdateStatus.ForeColor = Color.Gray;
 
-            ThreadPool.QueueUserWorkItem(delegate
+            System.Threading.ThreadPool.QueueUserWorkItem(delegate
             {
                 string errorMessage = null;
 
