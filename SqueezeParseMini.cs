@@ -2893,6 +2893,9 @@ namespace SqueezeParseMini
         /// </summary>
         private void DownloadUpdate()
         {
+            if (string.Equals(_latestKnownVersion, CurrentVersion, StringComparison.OrdinalIgnoreCase))
+                return; // already up to date, nothing to fetch
+                
             string path = _txtLocalFilePath.Text;
             if (string.IsNullOrEmpty(path))
             {
