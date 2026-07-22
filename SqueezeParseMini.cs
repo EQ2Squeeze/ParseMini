@@ -49,6 +49,8 @@ namespace SqueezeParseMini
         Healed,
         PersonalDPS,
         PersonalHPS,
+        ZonePersonalDPS,
+        ZonePersonalHPS,
         ZoneDPS,
         ZoneDamage,
         ZoneHPS,
@@ -833,16 +835,152 @@ namespace SqueezeParseMini
     }
 
     /// <summary>
+    /// Best-effort dark theme for the plugin's settings UI. WinForms has no
+    /// built-in dark mode, so this walks the control tree and recolors
+    /// everything it recognizes. A few bits of native chrome (ComboBox
+    /// dropdown lists, the dropdown arrow glyph, NumericUpDown's spinner
+    /// buttons) are rendered by Windows itself and don't fully follow
+    /// BackColor/ForeColor regardless of theme - that's a real WinForms
+    /// limitation, not something skipped here.
+    /// </summary>
+    internal static class DarkTheme
+    {
+        public static readonly Color WindowBack = Color.FromArgb(30, 30, 30);
+        public static readonly Color PanelBack = Color.FromArgb(37, 37, 38);
+        public static readonly Color ControlBack = Color.FromArgb(51, 51, 55);
+        public static readonly Color BorderColor = Color.FromArgb(80, 80, 84);
+        public static readonly Color TextColor = Color.FromArgb(225, 225, 225);
+        public static readonly Color AccentText = Color.White;
+
+        public static void Apply(Control root)
+        {
+            if (root == null) return;
+            root.BackColor = WindowBack;
+            root.ForeColor = TextColor;
+            ApplyRecursive(root);
+        }
+
+        // Uniform sizing applied to every matching control across the whole
+        // settings UI, so input boxes and buttons don't end up a different
+        // size depending on which row happened to create them.
+        public const int StandardComboWidth = 150;
+        public const int StandardNumericWidth = 60;
+        public const int StandardButtonWidth = 140;
+        public const int StandardControlHeight = 25;
+
+        private static void ApplyRecursive(Control parent)
+        {
+            foreach (Control c in parent.Controls)
+            {
+                if (c is GroupBox)
+                {
+                    c.BackColor = PanelBack;
+                    c.ForeColor = AccentText;
+                }
+                else if (c is ComboBox)
+                {
+                    c.BackColor = ControlBack;
+                    c.ForeColor = AccentText;
+                    c.Height = StandardControlHeight;
+                }
+                else if (c is NumericUpDown)
+                {
+                    c.BackColor = ControlBack;
+                    c.ForeColor = AccentText;
+                    c.Height = StandardControlHeight;
+                }
+                else if (c is TextBox)
+                {
+                    var txt = (TextBox)c;
+                    txt.BackColor = ControlBack;
+                    txt.ForeColor = AccentText;
+                    // A single-line TextBox's Height is locked to font
+                    // metrics and silently ignores an explicit Height
+                    // unless Multiline is set first - this is the standard
+                    // workaround to actually make it match everything else.
+                    txt.Multiline = true;
+                    txt.Height = StandardControlHeight;
+                }
+                else if (c is Button)
+                {
+                    var btn = (Button)c;
+                    btn.BackColor = ControlBack;
+                    btn.ForeColor = AccentText;
+                    btn.FlatStyle = FlatStyle.Flat;
+                    btn.FlatAppearance.BorderColor = BorderColor;
+                    btn.Height = StandardControlHeight;
+                }
+                else if (c is CheckBox)
+                {
+                    // Color.Transparent isn't safe here - several WinForms
+                    // control types throw ArgumentException ("Control does
+                    // not support transparent background colors") for any
+                    // BackColor with alpha < 255, and which types allow it
+                    // isn't consistent enough to rely on. Using the same
+                    // opaque PanelBack as the parent GroupBox gives the same
+                    // "blends into the background" look without that risk.
+                    c.BackColor = PanelBack;
+                    c.ForeColor = TextColor;
+                }
+                else if (c is TrackBar)
+                {
+                    c.BackColor = PanelBack;
+                }
+                else if (c is TabPage)
+                {
+                    c.BackColor = WindowBack;
+                    c.ForeColor = TextColor;
+                }
+                else if (c is TabControl)
+                {
+                    c.BackColor = WindowBack;
+                }
+                else if (c is Label)
+                {
+                    c.BackColor = PanelBack;
+                    // Status labels set their own color deliberately
+                    // (green/orange/gray for update state) - only recolor
+                    // labels still on the default system text color.
+                    if (c.ForeColor.ToArgb() == SystemColors.ControlText.ToArgb()
+                        || c.ForeColor.ToArgb() == Color.Black.ToArgb())
+                    {
+                        c.ForeColor = TextColor;
+                    }
+                }
+                else
+                {
+                    // Panel, FlowLayoutPanel, TableLayoutPanel, etc. - all
+                    // just organizational row/column wrappers. Same opaque
+                    // PanelBack as their GroupBox parent, so there's no
+                    // visible seam even though it's a real paint, not a
+                    // see-through background.
+                    c.BackColor = PanelBack;
+                    c.ForeColor = TextColor;
+                }
+
+                if (c.HasChildren)
+                    ApplyRecursive(c);
+            }
+        }
+    }
+
+    /// <summary>
     /// Everything for one independent parse window: its own overlay, its
     /// own settings tab, its own timer tick logic. Multiple instances can
     /// run side by side (e.g. one tuned for DPS, another for healing).
     /// </summary>
     public class ParseWindowController
     {
+        // Usable width inside a section GroupBox (MinimumSize 360, minus
+        // padding and the section layout's own (10,20) offset). Rows that
+        // need to span "the full width of their section" use this so
+        // multi-control rows actually line up with everything else instead
+        // of guessing a width per row.
+        private const int SectionContentWidth = 336;
+
         public TabPage Page;
         public SqueezeOverlayForm Overlay;
         public Button BtnRemoveWindow;
-        public GroupBox SelfGroupBox;
 
         private DateTime _lastCombatTime;
         private readonly string _defaultName;
@@ -858,9 +996,9 @@ namespace SqueezeParseMini
         private ComboBox _cmbMetric;
 
         // ----- Title bar controls -----
-        private CheckBox _chkHeaderLine1;
-        private CheckBox _chkHeaderLine2;
-        private CheckBox _chkHeaderLine3;
+        private FlowLayoutPanel _headerLinesContainer;
+        private readonly List<ComboBox> _headerLineCombos = new List<ComboBox>();
+        private Button _btnAddTitleLine;
         private CheckBox _chkShowHeaderBackground;
         private ComboBox _cmbHeaderBackColor;
         private ComboBox _cmbHeaderTextColor;
@@ -870,6 +1008,7 @@ namespace SqueezeParseMini
         private NumericUpDown _nudBarHeight;
         private NumericUpDown _nudBarGap;
         private TrackBar _trkOpacity;
+        private Label _lblOpacityPercent;
         private CheckBox _chkShowBorders;
         private CheckBox _chkUseGradient;
         private CheckBox _chkShowPercent;
@@ -963,6 +1102,18 @@ namespace SqueezeParseMini
             Color.FromArgb(255, 45, 45, 45),
             Color.FromArgb(255, 235, 235, 235),
             Color.FromArgb(255, 180, 180, 180)
+        };
+
+        // Selectable content for each dynamically added title-bar line.
+        // Index here is what actually gets persisted/matched against in
+        // Tick(), so don't reorder without updating both.
+        private static readonly string[] HeaderLineOptions = new string[]
+        {
+            "Time | Encounter",
+            "Dmg | Dps",
+            "Hld | Hps | Cures",
+            "Highest Hit",
+            "Highest Heal"
         };
 
         private static readonly string[] NamedColorLabels = new string[]
@@ -1110,267 +1261,35 @@ namespace SqueezeParseMini
             return idx;
         }
 
-        // ----- Settings tab layout -----
+        // ----- Layout helpers -----
 
-        public void BuildUI(TabPage page)
+        /// <summary>
+        /// A row of evenly-split columns spanning SectionContentWidth, used
+        /// whenever two or more controls sit side by side and should share
+        /// the row width evenly with a small gap between them.
+        /// </summary>
+        private static TableLayoutPanel CreateEvenRow(int columnCount, int rowCount)
         {
-            Page = page;
-            Page.Text = _defaultName;
-
-            var scrollPanel = new Panel
+            // Deliberately not AutoSize: mixing AutoSize=true with an
+            // explicitly-set Width on a TableLayoutPanel is unreliable -
+            // WinForms can recompute Width back down from the children's
+            // own (much smaller) preferred size on a later layout pass,
+            // silently undoing the explicit value and shrinking every
+            // control inside back toward its minimum. Fixed Width and
+            // Height side-step that entirely.
+            var table = new TableLayoutPanel
             {
-                Dock = DockStyle.Fill,
-                AutoScroll = true
+                ColumnCount = columnCount,
+                RowCount = rowCount,
+                Width = SectionContentWidth,
+                Height = rowCount * 30,
+                Margin = new Padding(0, 0, 0, 4)
             };
-            Page.Controls.Add(scrollPanel);
-
-            var mainFlow = new FlowLayoutPanel
-            {
-                AutoSize = true,
-                AutoSizeMode = AutoSizeMode.GrowAndShrink,
-                FlowDirection = FlowDirection.TopDown,
-                WrapContents = true,
-                MaximumSize = new Size(0, 620),
-                Padding = new Padding(8)
-            };
-            scrollPanel.Controls.Add(mainFlow);
-
-            // ----- This window -----
-            var windowGroup = CreateSectionGroupBox("This Window");
-            var windowLayout = CreateSectionLayout(windowGroup);
-
-            var lblTabName = new Label { Text = "Tab name:", AutoSize = true, Anchor = AnchorStyles.Left, Padding = new Padding(0, 4, 0, 0) };
-            _txtTabName = new TextBox { Text = _defaultName, Width = 120 };
-            AddRow(windowLayout, lblTabName, _txtTabName);
-
-            _btnRenameTab = new Button { Text = "Rename tab", AutoSize = true };
-            AddRow(windowLayout, _btnRenameTab, null);
-
-            _chkShowOverlay = new CheckBox { Name = "chkShowOverlay", Text = "Show overlay", AutoSize = true, Checked = true };
-            AddRow(windowLayout, _chkShowOverlay, null);
-
-            _btnResetPosition = new Button { Text = "Reset overlay position", AutoSize = true };
-            AddRow(windowLayout, _btnResetPosition, null);
-
-            BtnRemoveWindow = new Button { Text = "Remove this parse window", AutoSize = true };
-            AddRow(windowLayout, BtnRemoveWindow, null);
-
-            mainFlow.Controls.Add(windowGroup);
-
-            // ----- Data -----
-            var dataGroup = CreateSectionGroupBox("Data");
-            var dataLayout = CreateSectionLayout(dataGroup);
-
-            var lblMetric = new Label { Text = "Metric:", AutoSize = true, Anchor = AnchorStyles.Left, Padding = new Padding(0, 4, 0, 0) };
-            _cmbMetric = new ComboBox { Name = "cmbMetric", DropDownStyle = ComboBoxStyle.DropDownList, Width = 140 };
-            _cmbMetric.Items.AddRange(new object[] { "EncDPS", "DMG", "ZoneDPS", "ZoneDMG", "PersonalDPS", "EncHPS", "HPS + Cures", "HLD", "ZoneHPS", "ZoneHPS + Cures", "ZoneHLD", "PersonalHPS", "Hybrid DPS+HPS+Cures", "Hybrid HPS+DPS+Cures" });
-            _cmbMetric.SelectedIndex = 0;
-            AddRow(dataLayout, lblMetric, _cmbMetric);
-
-            var lblTopCount = new Label { Text = "Top rows shown:", AutoSize = true, Anchor = AnchorStyles.Left, Padding = new Padding(0, 4, 0, 0) };
-            _nudTopCount = new NumericUpDown { Name = "nudTopCount", Minimum = 1, Maximum = 24, Value = 6, Width = 60 };
-            AddRow(dataLayout, lblTopCount, _nudTopCount);
-
-            mainFlow.Controls.Add(dataGroup);
-
-            // ----- Title Bar -----
-            var headerGroup = CreateSectionGroupBox("Title Bar");
-            var headerLayout = CreateSectionLayout(headerGroup);
-
-            _chkHeaderLine1 = new CheckBox { Name = "chkHeaderLine1", Text = "Line 1: time | encounter", AutoSize = true, Checked = true };
-            AddRow(headerLayout, _chkHeaderLine1, null);
-
-            _chkHeaderLine2 = new CheckBox { Name = "chkHeaderLine2", Text = "Line 2: dmg | dps", AutoSize = true, Checked = true };
-            AddRow(headerLayout, _chkHeaderLine2, null);
-
-            _chkHeaderLine3 = new CheckBox { Name = "chkHeaderLine3", Text = "Line 3: hld | hps | cures", AutoSize = true, Checked = true };
-            AddRow(headerLayout, _chkHeaderLine3, null);
-
-            _chkShowHeaderBackground = new CheckBox { Name = "chkShowHeaderBackground", Text = "Show title bar background", AutoSize = true };
-            AddRow(headerLayout, _chkShowHeaderBackground, null);
-
-            var lblHeaderBackColor = new Label { Text = "Title bar background:", AutoSize = true, Anchor = AnchorStyles.Left, Padding = new Padding(0, 4, 0, 0) };
-            _cmbHeaderBackColor = new ComboBox { Name = "cmbHeaderBackColor", DropDownStyle = ComboBoxStyle.DropDownList, Width = 100, Enabled = false };
-            foreach (var label in BarBackColorLabels)
-                _cmbHeaderBackColor.Items.Add(label);
-            _cmbHeaderBackColor.SelectedIndex = 0;
-            AddRow(headerLayout, lblHeaderBackColor, _cmbHeaderBackColor);
-
-            var lblHeaderTextColor = new Label { Text = "Title text color:", AutoSize = true, Anchor = AnchorStyles.Left, Padding = new Padding(0, 4, 0, 0) };
-            _cmbHeaderTextColor = new ComboBox { Name = "cmbHeaderTextColor", DropDownStyle = ComboBoxStyle.DropDownList, Width = 100 };
-            foreach (var label in TextColorLabels)
-                _cmbHeaderTextColor.Items.Add(label);
-            _cmbHeaderTextColor.SelectedIndex = 0;
-            AddRow(headerLayout, lblHeaderTextColor, _cmbHeaderTextColor);
-
-            mainFlow.Controls.Add(headerGroup);
-
-            // ----- Bars -----
-            var barsGroup = CreateSectionGroupBox("Bars");
-            var barsLayout = CreateSectionLayout(barsGroup);
-
-            var lblWidth = new Label { Text = "Overlay width:", AutoSize = true, Anchor = AnchorStyles.Left, Padding = new Padding(0, 4, 0, 0) };
-            _nudOverlayWidth = new NumericUpDown { Name = "nudOverlayWidth", Minimum = 150, Maximum = 800, Value = 260, Width = 60 };
-            AddRow(barsLayout, lblWidth, _nudOverlayWidth);
-
-            var lblBarHeight = new Label { Text = "Bar height:", AutoSize = true, Anchor = AnchorStyles.Left, Padding = new Padding(0, 4, 0, 0) };
-            _nudBarHeight = new NumericUpDown { Name = "nudBarHeight", Minimum = 14, Maximum = 60, Value = 22, Width = 60 };
-            AddRow(barsLayout, lblBarHeight, _nudBarHeight);
-
-            var lblBarGap = new Label { Text = "Bar spacing:", AutoSize = true, Anchor = AnchorStyles.Left, Padding = new Padding(0, 4, 0, 0) };
-            _nudBarGap = new NumericUpDown { Name = "nudBarGap", Minimum = 0, Maximum = 20, Value = 0, Width = 60 };
-            AddRow(barsLayout, lblBarGap, _nudBarGap);
-
-            var lblOpacity = new Label { Text = "Overlay opacity:", AutoSize = true, Anchor = AnchorStyles.Left, Padding = new Padding(0, 4, 0, 0) };
-            _trkOpacity = new TrackBar { Name = "trkOpacity", Minimum = 20, Maximum = 255, Value = 255, Width = 150, TickStyle = TickStyle.None };
-            AddRow(barsLayout, lblOpacity, _trkOpacity);
-
-            _chkShowBorders = new CheckBox { Name = "chkShowBorders", Text = "Show bar borders", AutoSize = true, Checked = true };
-            AddRow(barsLayout, _chkShowBorders, null);
-
-            _chkUseGradient = new CheckBox { Name = "chkUseGradient", Text = "Gradient bar fill (unchecked = solid color)", AutoSize = true, Checked = true };
-            AddRow(barsLayout, _chkUseGradient, null);
-
-            _chkShowPercent = new CheckBox { Name = "chkShowPercent", Text = "Show % of top parser", AutoSize = true };
-            AddRow(barsLayout, _chkShowPercent, null);
-
-            _chkPortraitMode = new CheckBox { Name = "chkPortraitMode", Text = "Portrait mode (vertical columns)", AutoSize = true };
-            AddRow(barsLayout, _chkPortraitMode, null);
-
-            mainFlow.Controls.Add(barsGroup);
-
-            // ----- Colors -----
-            var colorsGroup = CreateSectionGroupBox("Colors");
-            var colorsLayout = CreateSectionLayout(colorsGroup);
-
-            var lblBarBackColor = new Label { Text = "Bar background:", AutoSize = true, Anchor = AnchorStyles.Left, Padding = new Padding(0, 4, 0, 0) };
-            _cmbBarBackColor = new ComboBox { Name = "cmbBarBackColor", DropDownStyle = ComboBoxStyle.DropDownList, Width = 100 };
-            foreach (var label in BarBackColorLabels)
-                _cmbBarBackColor.Items.Add(label);
-            _cmbBarBackColor.SelectedIndex = 0;
-            AddRow(colorsLayout, lblBarBackColor, _cmbBarBackColor);
-
-            var lblTextColor = new Label { Text = "Bar text color:", AutoSize = true, Anchor = AnchorStyles.Left, Padding = new Padding(0, 4, 0, 0) };
-            _cmbTextColor = new ComboBox { Name = "cmbTextColor", DropDownStyle = ComboBoxStyle.DropDownList, Width = 100 };
-            foreach (var label in TextColorLabels)
-                _cmbTextColor.Items.Add(label);
-            _cmbTextColor.SelectedIndex = 0;
-            AddRow(colorsLayout, lblTextColor, _cmbTextColor);
-
-            var lblColorMode = new Label { Text = "Bar coloring:", AutoSize = true, Anchor = AnchorStyles.Left, Padding = new Padding(0, 4, 0, 0) };
-            _cmbColorMode = new ComboBox { Name = "cmbColorMode", DropDownStyle = ComboBoxStyle.DropDownList, Width = 100 };
-            _cmbColorMode.Items.AddRange(new object[] { "Single Color", "Palette" });
-            _cmbColorMode.SelectedIndex = 1;
-            AddRow(colorsLayout, lblColorMode, _cmbColorMode);
-
-            var lblColorStyle = new Label { Text = "Single color tint:", AutoSize = true, Anchor = AnchorStyles.Left, Padding = new Padding(0, 4, 0, 0) };
-            _cmbColorStyle = new ComboBox { Name = "cmbColorStyle", DropDownStyle = ComboBoxStyle.DropDownList, Width = 100 };
-            _cmbColorStyle.Items.AddRange(new object[] { "Rich", "Pastel" });
-            _cmbColorStyle.SelectedIndex = 0;
-            AddRow(colorsLayout, lblColorStyle, _cmbColorStyle);
-
-            var lblSingleColor = new Label { Text = "Single color:", AutoSize = true, Anchor = AnchorStyles.Left, Padding = new Padding(0, 4, 0, 0) };
-            _cmbSingleColor = new ComboBox { Name = "cmbSingleColor", DropDownStyle = ComboBoxStyle.DropDownList, Width = 100 };
-            foreach (var label in NamedColorLabels)
-                _cmbSingleColor.Items.Add(label);
-            _cmbSingleColor.SelectedIndex = 0;
-            AddRow(colorsLayout, lblSingleColor, _cmbSingleColor);
-
-            var lblPalette = new Label { Text = "Palette:", AutoSize = true, Anchor = AnchorStyles.Left, Padding = new Padding(0, 4, 0, 0) };
-            _cmbPalette = new ComboBox { Name = "cmbPalette", DropDownStyle = ComboBoxStyle.DropDownList, Width = 150 };
-            _cmbPalette.Items.AddRange(new object[] { "Rich", "Pastel", "IBM Colorblind Safe", "Wong Colorblind Safe", "Tol Qualitative", "Tol Bright" });
-            _cmbPalette.SelectedIndex = 0;
-            AddRow(colorsLayout, lblPalette, _cmbPalette);
-
-            mainFlow.Controls.Add(colorsGroup);
-
-            // ----- Self (find-me-quickly options) -----
-            var selfGroup = CreateSectionGroupBox("Self");
-            var selfLayout = CreateSectionLayout(selfGroup);
-
-            _chkSelfBarColorEnabled = new CheckBox { Name = "chkSelfBarColorEnabled", Text = "Custom color for my bar", AutoSize = true };
-            AddRow(selfLayout, _chkSelfBarColorEnabled, null);
-
-            var lblSelfBarColor = new Label { Text = "My bar color:", AutoSize = true, Anchor = AnchorStyles.Left, Padding = new Padding(0, 4, 0, 0) };
-            _cmbSelfBarColor = new ComboBox { Name = "cmbSelfBarColor", DropDownStyle = ComboBoxStyle.DropDownList, Width = 100, Enabled = false };
-            foreach (var label in NamedColorLabels)
-                _cmbSelfBarColor.Items.Add(label);
-            _cmbSelfBarColor.SelectedIndex = 0;
-            AddRow(selfLayout, lblSelfBarColor, _cmbSelfBarColor);
-
-            _chkSelfTextColorEnabled = new CheckBox { Name = "chkSelfTextColorEnabled", Text = "Custom text color for me", AutoSize = true };
-            AddRow(selfLayout, _chkSelfTextColorEnabled, null);
-
-            var lblSelfTextColor = new Label { Text = "My text color:", AutoSize = true, Anchor = AnchorStyles.Left, Padding = new Padding(0, 4, 0, 0) };
-            _cmbSelfTextColor = new ComboBox { Name = "cmbSelfTextColor", DropDownStyle = ComboBoxStyle.DropDownList, Width = 100, Enabled = false };
-            foreach (var label in TextColorLabels)
-                _cmbSelfTextColor.Items.Add(label);
-            _cmbSelfTextColor.SelectedIndex = 0;
-            AddRow(selfLayout, lblSelfTextColor, _cmbSelfTextColor);
-
-            _chkHighlightSelf = new CheckBox { Name = "chkHighlightSelf", Text = "Highlight me with a border", AutoSize = true };
-            AddRow(selfLayout, _chkHighlightSelf, null);
-
-            var lblHighlightColor = new Label { Text = "Highlight color:", AutoSize = true, Anchor = AnchorStyles.Left, Padding = new Padding(0, 4, 0, 0) };
-            _cmbHighlightColor = new ComboBox { Name = "cmbHighlightColor", DropDownStyle = ComboBoxStyle.DropDownList, Width = 100, Enabled = false };
-            foreach (var label in TextColorLabels)
-                _cmbHighlightColor.Items.Add(label);
-            _cmbHighlightColor.SelectedIndex = 6; // "Yellow"
-            AddRow(selfLayout, lblHighlightColor, _cmbHighlightColor);
-
-            mainFlow.Controls.Add(selfGroup);
-            SelfGroupBox = selfGroup;
-
-            // ----- Auto-fade -----
-            var fadeGroup = CreateSectionGroupBox("Auto-Fade");
-            var fadeLayout = CreateSectionLayout(fadeGroup);
-
-            _chkFadeEnabled = new CheckBox { Name = "chkFadeEnabled", Text = "Fade out when idle", AutoSize = true };
-            AddRow(fadeLayout, _chkFadeEnabled, null);
-
-            var lblFadeSeconds = new Label { Text = "Fade after (seconds):", AutoSize = true, Anchor = AnchorStyles.Left, Padding = new Padding(0, 4, 0, 0) };
-            _nudFadeSeconds = new NumericUpDown { Name = "nudFadeSeconds", Minimum = 5, Maximum = 600, Value = 30, Width = 60 };
-            AddRow(fadeLayout, lblFadeSeconds, _nudFadeSeconds);
-
-            mainFlow.Controls.Add(fadeGroup);
-
-            // ----- Wire events -----
-            _btnRenameTab.Click += (s, e) => { Page.Text = string.IsNullOrEmpty(_txtTabName.Text) ? _defaultName : _txtTabName.Text; };
-            _chkShowOverlay.CheckedChanged += (s, e) => { ApplyVisibility(); };
-            _btnResetPosition.Click += (s, e) => { Overlay.Left = 200; Overlay.Top = 200; };
-            _nudTopCount.ValueChanged += (s, e) => ApplyAppearanceSettings();
-            _cmbMetric.SelectedIndexChanged += (s, e) => ApplyAppearanceSettings();
-            _nudOverlayWidth.ValueChanged += (s, e) => ApplyAppearanceSettings();
-            _nudBarHeight.ValueChanged += (s, e) => ApplyAppearanceSettings();
-            _nudBarGap.ValueChanged += (s, e) => ApplyAppearanceSettings();
-            _trkOpacity.ValueChanged += (s, e) => ApplyAppearanceSettings();
-            _chkShowBorders.CheckedChanged += (s, e) => ApplyAppearanceSettings();
-            _chkUseGradient.CheckedChanged += (s, e) => ApplyAppearanceSettings();
-            _chkPortraitMode.CheckedChanged += (s, e) => ApplyAppearanceSettings();
-            _cmbColorStyle.SelectedIndexChanged += (s, e) => ApplyAppearanceSettings();
-            _cmbTextColor.SelectedIndexChanged += (s, e) => ApplyAppearanceSettings();
-            _cmbColorMode.SelectedIndexChanged += (s, e) => ApplyAppearanceSettings();
-            _cmbSingleColor.SelectedIndexChanged += (s, e) => ApplyAppearanceSettings();
-            _cmbPalette.SelectedIndexChanged += (s, e) => ApplyAppearanceSettings();
-            _cmbBarBackColor.SelectedIndexChanged += (s, e) => ApplyAppearanceSettings();
-            _chkShowPercent.CheckedChanged += (s, e) => ApplyAppearanceSettings();
-            _chkFadeEnabled.CheckedChanged += (s, e) => { };
-            _chkHeaderLine1.CheckedChanged += (s, e) => ApplyAppearanceSettings();
-            _chkHeaderLine2.CheckedChanged += (s, e) => ApplyAppearanceSettings();
-            _chkHeaderLine3.CheckedChanged += (s, e) => ApplyAppearanceSettings();
-            _chkShowHeaderBackground.CheckedChanged += (s, e) => ApplyAppearanceSettings();
-            _cmbHeaderBackColor.SelectedIndexChanged += (s, e) => ApplyAppearanceSettings();
-            _cmbHeaderTextColor.SelectedIndexChanged += (s, e) => ApplyAppearanceSettings();
-            _chkSelfBarColorEnabled.CheckedChanged += (s, e) => ApplyAppearanceSettings();
-            _cmbSelfBarColor.SelectedIndexChanged += (s, e) => ApplyAppearanceSettings();
-            _chkSelfTextColorEnabled.CheckedChanged += (s, e) => ApplyAppearanceSettings();
-            _cmbSelfTextColor.SelectedIndexChanged += (s, e) => ApplyAppearanceSettings();
-            _chkHighlightSelf.CheckedChanged += (s, e) => ApplyAppearanceSettings();
-            _cmbHighlightColor.SelectedIndexChanged += (s, e) => ApplyAppearanceSettings();
-
-            ApplyAppearanceSettings();
-            ApplyVisibility();
-            Overlay.UpdateVisual();
+            for (int i = 0; i < columnCount; i++)
+                table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f / columnCount));
+            for (int i = 0; i < rowCount; i++)
+                table.RowStyles.Add(new RowStyle(SizeType.Percent, 100f / rowCount));
+            return table;
         }
 
         private GroupBox CreateSectionGroupBox(string title)
@@ -1417,6 +1336,340 @@ namespace SqueezeParseMini
                 layout.SetColumnSpan(left, 2);
         }
 
+        // ----- Settings tab layout -----
+
+        public void BuildUI(TabPage page)
+        {
+            Page = page;
+            Page.Text = _defaultName;
+
+            var scrollPanel = new Panel
+            {
+                Dock = DockStyle.Fill,
+                AutoScroll = true
+            };
+            Page.Controls.Add(scrollPanel);
+
+            var mainFlow = new FlowLayoutPanel
+            {
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                FlowDirection = FlowDirection.TopDown,
+                WrapContents = true,
+                MaximumSize = new Size(0, 620),
+                Padding = new Padding(8)
+            };
+            scrollPanel.Controls.Add(mainFlow);
+
+            // ----- This window -----
+            var windowGroup = CreateSectionGroupBox("This Window");
+            var windowLayout = CreateSectionLayout(windowGroup);
+
+            // Row: Show overlay | Remove window | Reset position
+            // (checkbox keeps its natural size; the two buttons split the
+            // remaining row width evenly).
+            var windowRow1 = new TableLayoutPanel { ColumnCount = 3, RowCount = 1, Width = SectionContentWidth, Height = 26, Margin = new Padding(0, 0, 0, 4) };
+            windowRow1.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            windowRow1.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50f));
+            windowRow1.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50f));
+            windowRow1.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+            _chkShowOverlay = new CheckBox { Name = "chkShowOverlay", Text = "Show overlay", AutoSize = true, Checked = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 5, 12, 0) };
+            windowRow1.Controls.Add(_chkShowOverlay, 0, 0);
+
+            BtnRemoveWindow = new Button { Text = "Remove window", Dock = DockStyle.Fill, Margin = new Padding(0, 0, 4, 0) };
+            windowRow1.Controls.Add(BtnRemoveWindow, 1, 0);
+
+            _btnResetPosition = new Button { Text = "Reset position", Dock = DockStyle.Fill, Margin = new Padding(0) };
+            windowRow1.Controls.Add(_btnResetPosition, 2, 0);
+
+            AddRow(windowLayout, windowRow1, null);
+
+            // Row: Opacity label | slider (fills remaining width) | percent
+            var opacityRow = new TableLayoutPanel { ColumnCount = 3, RowCount = 1, Width = SectionContentWidth, Height = 45, Margin = new Padding(0, 0, 0, 8) };
+            opacityRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            opacityRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+            opacityRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            opacityRow.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+            var lblOpacity = new Label { Text = "Opacity:", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 0, 4, 0) };
+            opacityRow.Controls.Add(lblOpacity, 0, 0);
+
+            _trkOpacity = new TrackBar { Name = "trkOpacity", Minimum = 0, Maximum = 255, Value = 255, Dock = DockStyle.Fill, TickStyle = TickStyle.None, Margin = new Padding(0, 20, 4, 0) };
+            opacityRow.Controls.Add(_trkOpacity, 1, 0);
+
+            _lblOpacityPercent = new Label { Text = "100%", AutoSize = true, Anchor = AnchorStyles.Right, Margin = new Padding(0, 0, 0, 0) };
+            opacityRow.Controls.Add(_lblOpacityPercent, 2, 0);
+
+            AddRow(windowLayout, opacityRow, null);
+
+            // Row: tab name box | Rename tab button (equal width, no label)
+            var tabNameRow = CreateEvenRow(2, 1);
+            tabNameRow.Height = 26;
+            _txtTabName = new TextBox { Text = _defaultName, Dock = DockStyle.Fill, Margin = new Padding(0, 0, 4, 0) };
+            tabNameRow.Controls.Add(_txtTabName, 0, 0);
+            _btnRenameTab = new Button { Text = "Rename tab", Dock = DockStyle.Fill, Margin = new Padding(0) };
+            tabNameRow.Controls.Add(_btnRenameTab, 1, 0);
+            AddRow(windowLayout, tabNameRow, null);
+
+            mainFlow.Controls.Add(windowGroup);
+
+            // ----- Data -----
+            var dataGroup = CreateSectionGroupBox("Data");
+            var dataLayout = CreateSectionLayout(dataGroup);
+
+            var lblMetric = new Label { Text = "Metric:", AutoSize = true, Anchor = AnchorStyles.Left, Padding = new Padding(0, 4, 0, 0) };
+            _cmbMetric = new ComboBox { Name = "cmbMetric", DropDownStyle = ComboBoxStyle.DropDownList, Width = 150 };
+            _cmbMetric.Items.AddRange(new object[] { "EncDPS", "DMG", "ZoneDPS", "ZoneDMG", "PersonalDPS", "ZonePersonalDPS", "EncHPS", "HPS + Cures", "HLD", "ZoneHPS", "ZoneHPS + Cures", "ZoneHLD", "PersonalHPS", "ZonePersonalHPS", "Hybrid DPS+HPS+Cures", "Hybrid HPS+DPS+Cures" });
+            _cmbMetric.SelectedIndex = 0;
+            AddRow(dataLayout, lblMetric, _cmbMetric);
+
+            mainFlow.Controls.Add(dataGroup);
+
+            // ----- Title Bar -----
+            var headerGroup = CreateSectionGroupBox("Title Bar");
+            var headerLayout = CreateSectionLayout(headerGroup);
+
+            _btnAddTitleLine = new Button { Text = "Add title", AutoSize = true, Margin = new Padding(0, 0, 0, 8) };
+            _btnAddTitleLine.Click += (s, e) => { AddHeaderLineRow(0); ApplyAppearanceSettings(); };
+            AddRow(headerLayout, _btnAddTitleLine, null);
+
+            _headerLinesContainer = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoSize = true };
+            AddRow(headerLayout, _headerLinesContainer, null);
+
+            // Default for a brand-new window is just the time/encounter
+            // line - LoadFromXml clears this and rebuilds from saved data
+            // for an existing window.
+            AddHeaderLineRow(0);
+
+            _chkShowHeaderBackground = new CheckBox { Name = "chkShowHeaderBackground", Text = "Show background", AutoSize = true, Margin = new Padding(0, 8, 0, 0) };
+            AddRow(headerLayout, _chkShowHeaderBackground, null);
+
+            var lblHeaderBackColor = new Label { Text = "Background color:", AutoSize = true, Anchor = AnchorStyles.Left, Padding = new Padding(0, 4, 0, 0) };
+            _cmbHeaderBackColor = new ComboBox { Name = "cmbHeaderBackColor", DropDownStyle = ComboBoxStyle.DropDownList, Width = 150, Enabled = false };
+            foreach (var label in BarBackColorLabels)
+                _cmbHeaderBackColor.Items.Add(label);
+            _cmbHeaderBackColor.SelectedIndex = 0;
+            AddRow(headerLayout, lblHeaderBackColor, _cmbHeaderBackColor);
+
+            var lblHeaderTextColor = new Label { Text = "Text color:", AutoSize = true, Anchor = AnchorStyles.Left, Padding = new Padding(0, 4, 0, 0) };
+            _cmbHeaderTextColor = new ComboBox { Name = "cmbHeaderTextColor", DropDownStyle = ComboBoxStyle.DropDownList, Width = 150 };
+            foreach (var label in TextColorLabels)
+                _cmbHeaderTextColor.Items.Add(label);
+            _cmbHeaderTextColor.SelectedIndex = 0;
+            AddRow(headerLayout, lblHeaderTextColor, _cmbHeaderTextColor);
+
+            mainFlow.Controls.Add(headerGroup);
+
+            // ----- Bars -----
+            var barsGroup = CreateSectionGroupBox("Bars");
+            var barsLayout = CreateSectionLayout(barsGroup);
+
+            // Rows | Width | Height | Spacing - 4 evenly spaced columns,
+            // label above each box.
+            var sizesTable = CreateEvenRow(4, 2);
+
+            var lblRows = new Label { Text = "Rows", AutoSize = true, Anchor = AnchorStyles.None };
+            sizesTable.Controls.Add(lblRows, 0, 0);
+            _nudTopCount = new NumericUpDown { Name = "nudTopCount", Minimum = 1, Maximum = 24, Value = 6, Width = 50, Anchor = AnchorStyles.None };
+            sizesTable.Controls.Add(_nudTopCount, 0, 1);
+
+            var lblSizeWidth = new Label { Text = "Width", AutoSize = true, Anchor = AnchorStyles.None };
+            sizesTable.Controls.Add(lblSizeWidth, 1, 0);
+            _nudOverlayWidth = new NumericUpDown { Name = "nudOverlayWidth", Minimum = 150, Maximum = 800, Value = 260, Width = 50, Anchor = AnchorStyles.None };
+            sizesTable.Controls.Add(_nudOverlayWidth, 1, 1);
+
+            var lblSizeHeight = new Label { Text = "Height", AutoSize = true, Anchor = AnchorStyles.None };
+            sizesTable.Controls.Add(lblSizeHeight, 2, 0);
+            _nudBarHeight = new NumericUpDown { Name = "nudBarHeight", Minimum = 14, Maximum = 60, Value = 22, Width = 50, Anchor = AnchorStyles.None };
+            sizesTable.Controls.Add(_nudBarHeight, 2, 1);
+
+            var lblSizeSpacing = new Label { Text = "Spacing", AutoSize = true, Anchor = AnchorStyles.None };
+            sizesTable.Controls.Add(lblSizeSpacing, 3, 0);
+            _nudBarGap = new NumericUpDown { Name = "nudBarGap", Minimum = 0, Maximum = 20, Value = 0, Width = 50, Anchor = AnchorStyles.None };
+            sizesTable.Controls.Add(_nudBarGap, 3, 1);
+
+            AddRow(barsLayout, sizesTable, null);
+
+            // Checkboxes in 3 evenly spaced columns.
+            var checkTable = CreateEvenRow(3, 2);
+            _chkShowBorders = new CheckBox { Name = "chkShowBorders", Text = "Show borders", AutoSize = true, Checked = true, Anchor = AnchorStyles.Left };
+            checkTable.Controls.Add(_chkShowBorders, 0, 0);
+            _chkUseGradient = new CheckBox { Name = "chkUseGradient", Text = "Gradient fill", AutoSize = true, Checked = true, Anchor = AnchorStyles.Left };
+            checkTable.Controls.Add(_chkUseGradient, 1, 0);
+            _chkShowPercent = new CheckBox { Name = "chkShowPercent", Text = "Show %", AutoSize = true, Anchor = AnchorStyles.Left };
+            checkTable.Controls.Add(_chkShowPercent, 2, 0);
+            _chkPortraitMode = new CheckBox { Name = "chkPortraitMode", Text = "Portrait mode", AutoSize = true, Anchor = AnchorStyles.Left };
+            checkTable.Controls.Add(_chkPortraitMode, 0, 1);
+
+            AddRow(barsLayout, checkTable, null);
+
+            mainFlow.Controls.Add(barsGroup);
+
+            // ----- Colors -----
+            var colorsGroup = CreateSectionGroupBox("Colors");
+            var colorsLayout = CreateSectionLayout(colorsGroup);
+
+            var lblBarBackColor = new Label { Text = "Bar background:", AutoSize = true, Anchor = AnchorStyles.Left, Padding = new Padding(0, 4, 0, 0) };
+            _cmbBarBackColor = new ComboBox { Name = "cmbBarBackColor", DropDownStyle = ComboBoxStyle.DropDownList, Width = 150 };
+            foreach (var label in BarBackColorLabels)
+                _cmbBarBackColor.Items.Add(label);
+            _cmbBarBackColor.SelectedIndex = 0;
+            AddRow(colorsLayout, lblBarBackColor, _cmbBarBackColor);
+
+            var lblTextColor = new Label { Text = "Bar text color:", AutoSize = true, Anchor = AnchorStyles.Left, Padding = new Padding(0, 4, 0, 0) };
+            _cmbTextColor = new ComboBox { Name = "cmbTextColor", DropDownStyle = ComboBoxStyle.DropDownList, Width = 150 };
+            foreach (var label in TextColorLabels)
+                _cmbTextColor.Items.Add(label);
+            _cmbTextColor.SelectedIndex = 0;
+            AddRow(colorsLayout, lblTextColor, _cmbTextColor);
+
+            var lblColorMode = new Label { Text = "Bar coloring:", AutoSize = true, Anchor = AnchorStyles.Left, Padding = new Padding(0, 4, 0, 0) };
+            _cmbColorMode = new ComboBox { Name = "cmbColorMode", DropDownStyle = ComboBoxStyle.DropDownList, Width = 150 };
+            _cmbColorMode.Items.AddRange(new object[] { "Single Color", "Palette" });
+            _cmbColorMode.SelectedIndex = 1;
+            AddRow(colorsLayout, lblColorMode, _cmbColorMode);
+
+            var lblColorStyle = new Label { Text = "Single color tint:", AutoSize = true, Anchor = AnchorStyles.Left, Padding = new Padding(0, 4, 0, 0) };
+            _cmbColorStyle = new ComboBox { Name = "cmbColorStyle", DropDownStyle = ComboBoxStyle.DropDownList, Width = 150 };
+            _cmbColorStyle.Items.AddRange(new object[] { "Rich", "Pastel" });
+            _cmbColorStyle.SelectedIndex = 0;
+            AddRow(colorsLayout, lblColorStyle, _cmbColorStyle);
+
+            var lblSingleColor = new Label { Text = "Single color:", AutoSize = true, Anchor = AnchorStyles.Left, Padding = new Padding(0, 4, 0, 0) };
+            _cmbSingleColor = new ComboBox { Name = "cmbSingleColor", DropDownStyle = ComboBoxStyle.DropDownList, Width = 150 };
+            foreach (var label in NamedColorLabels)
+                _cmbSingleColor.Items.Add(label);
+            _cmbSingleColor.SelectedIndex = 0;
+            AddRow(colorsLayout, lblSingleColor, _cmbSingleColor);
+
+            var lblPalette = new Label { Text = "Palette:", AutoSize = true, Anchor = AnchorStyles.Left, Padding = new Padding(0, 4, 0, 0) };
+            _cmbPalette = new ComboBox { Name = "cmbPalette", DropDownStyle = ComboBoxStyle.DropDownList, Width = 150 };
+            _cmbPalette.Items.AddRange(new object[] { "Rich", "Pastel", "IBM Colorblind Safe", "Wong Colorblind Safe", "Tol Qualitative", "Tol Bright" });
+            _cmbPalette.SelectedIndex = 0;
+            AddRow(colorsLayout, lblPalette, _cmbPalette);
+
+            mainFlow.Controls.Add(colorsGroup);
+
+            // ----- Self (find-me-quickly options) -----
+            var selfGroup = CreateSectionGroupBox("Self");
+            var selfLayout = CreateSectionLayout(selfGroup);
+
+            var selfBarLeft = new FlowLayoutPanel { FlowDirection = FlowDirection.LeftToRight, WrapContents = false, AutoSize = true };
+            _chkSelfBarColorEnabled = new CheckBox { Name = "chkSelfBarColorEnabled", Text = "", AutoSize = true, Margin = new Padding(0, 6, 4, 0) };
+            selfBarLeft.Controls.Add(_chkSelfBarColorEnabled);
+            var lblSelfBarColor = new Label { Text = "Bar color:", AutoSize = true, Margin = new Padding(0, 8, 0, 0) };
+            selfBarLeft.Controls.Add(lblSelfBarColor);
+            _cmbSelfBarColor = new ComboBox { Name = "cmbSelfBarColor", DropDownStyle = ComboBoxStyle.DropDownList, Width = 150, Enabled = false };
+            foreach (var label in NamedColorLabels)
+                _cmbSelfBarColor.Items.Add(label);
+            _cmbSelfBarColor.SelectedIndex = 0;
+            AddRow(selfLayout, selfBarLeft, _cmbSelfBarColor);
+
+            var selfTextLeft = new FlowLayoutPanel { FlowDirection = FlowDirection.LeftToRight, WrapContents = false, AutoSize = true };
+            _chkSelfTextColorEnabled = new CheckBox { Name = "chkSelfTextColorEnabled", Text = "", AutoSize = true, Margin = new Padding(0, 6, 4, 0) };
+            selfTextLeft.Controls.Add(_chkSelfTextColorEnabled);
+            var lblSelfTextColor = new Label { Text = "Text color:", AutoSize = true, Margin = new Padding(0, 8, 0, 0) };
+            selfTextLeft.Controls.Add(lblSelfTextColor);
+            _cmbSelfTextColor = new ComboBox { Name = "cmbSelfTextColor", DropDownStyle = ComboBoxStyle.DropDownList, Width = 150, Enabled = false };
+            foreach (var label in TextColorLabels)
+                _cmbSelfTextColor.Items.Add(label);
+            _cmbSelfTextColor.SelectedIndex = 0;
+            AddRow(selfLayout, selfTextLeft, _cmbSelfTextColor);
+
+            var selfBorderLeft = new FlowLayoutPanel { FlowDirection = FlowDirection.LeftToRight, WrapContents = false, AutoSize = true };
+            _chkHighlightSelf = new CheckBox { Name = "chkHighlightSelf", Text = "", AutoSize = true, Margin = new Padding(0, 6, 4, 0) };
+            selfBorderLeft.Controls.Add(_chkHighlightSelf);
+            var lblHighlightColor = new Label { Text = "Border color:", AutoSize = true, Margin = new Padding(0, 8, 0, 0) };
+            selfBorderLeft.Controls.Add(lblHighlightColor);
+            _cmbHighlightColor = new ComboBox { Name = "cmbHighlightColor", DropDownStyle = ComboBoxStyle.DropDownList, Width = 150, Enabled = false };
+            foreach (var label in TextColorLabels)
+                _cmbHighlightColor.Items.Add(label);
+            _cmbHighlightColor.SelectedIndex = 6; // "Yellow"
+            AddRow(selfLayout, selfBorderLeft, _cmbHighlightColor);
+
+            mainFlow.Controls.Add(selfGroup);
+
+            // ----- Auto-fade -----
+            var fadeGroup = CreateSectionGroupBox("Auto-Fade");
+            var fadeLayout = CreateSectionLayout(fadeGroup);
+
+            _chkFadeEnabled = new CheckBox { Name = "chkFadeEnabled", Text = "Fade out when idle", AutoSize = true };
+            AddRow(fadeLayout, _chkFadeEnabled, null);
+
+            var lblFadeSeconds = new Label { Text = "Fade after (seconds):", AutoSize = true, Anchor = AnchorStyles.Left, Padding = new Padding(0, 4, 0, 0) };
+            _nudFadeSeconds = new NumericUpDown { Name = "nudFadeSeconds", Minimum = 5, Maximum = 600, Value = 30, Width = 60 };
+            AddRow(fadeLayout, lblFadeSeconds, _nudFadeSeconds);
+
+            mainFlow.Controls.Add(fadeGroup);
+
+            // ----- Wire events -----
+            _btnRenameTab.Click += (s, e) => { Page.Text = string.IsNullOrEmpty(_txtTabName.Text) ? _defaultName : _txtTabName.Text; };
+            _chkShowOverlay.CheckedChanged += (s, e) => { ApplyVisibility(); };
+            _btnResetPosition.Click += (s, e) => { Overlay.Left = 200; Overlay.Top = 200; };
+            _nudTopCount.ValueChanged += (s, e) => ApplyAppearanceSettings();
+            _cmbMetric.SelectedIndexChanged += (s, e) => ApplyAppearanceSettings();
+            _nudOverlayWidth.ValueChanged += (s, e) => ApplyAppearanceSettings();
+            _nudBarHeight.ValueChanged += (s, e) => ApplyAppearanceSettings();
+            _nudBarGap.ValueChanged += (s, e) => ApplyAppearanceSettings();
+            _trkOpacity.ValueChanged += (s, e) => ApplyAppearanceSettings();
+            _chkShowBorders.CheckedChanged += (s, e) => ApplyAppearanceSettings();
+            _chkUseGradient.CheckedChanged += (s, e) => ApplyAppearanceSettings();
+            _chkPortraitMode.CheckedChanged += (s, e) => ApplyAppearanceSettings();
+            _cmbColorStyle.SelectedIndexChanged += (s, e) => ApplyAppearanceSettings();
+            _cmbTextColor.SelectedIndexChanged += (s, e) => ApplyAppearanceSettings();
+            _cmbColorMode.SelectedIndexChanged += (s, e) => ApplyAppearanceSettings();
+            _cmbSingleColor.SelectedIndexChanged += (s, e) => ApplyAppearanceSettings();
+            _cmbPalette.SelectedIndexChanged += (s, e) => ApplyAppearanceSettings();
+            _cmbBarBackColor.SelectedIndexChanged += (s, e) => ApplyAppearanceSettings();
+            _chkShowPercent.CheckedChanged += (s, e) => ApplyAppearanceSettings();
+            _chkFadeEnabled.CheckedChanged += (s, e) => { };
+            _chkShowHeaderBackground.CheckedChanged += (s, e) => ApplyAppearanceSettings();
+            _cmbHeaderBackColor.SelectedIndexChanged += (s, e) => ApplyAppearanceSettings();
+            _cmbHeaderTextColor.SelectedIndexChanged += (s, e) => ApplyAppearanceSettings();
+            _chkSelfBarColorEnabled.CheckedChanged += (s, e) => ApplyAppearanceSettings();
+            _cmbSelfBarColor.SelectedIndexChanged += (s, e) => ApplyAppearanceSettings();
+            _chkSelfTextColorEnabled.CheckedChanged += (s, e) => ApplyAppearanceSettings();
+            _cmbSelfTextColor.SelectedIndexChanged += (s, e) => ApplyAppearanceSettings();
+            _chkHighlightSelf.CheckedChanged += (s, e) => ApplyAppearanceSettings();
+            _cmbHighlightColor.SelectedIndexChanged += (s, e) => ApplyAppearanceSettings();
+
+            ApplyAppearanceSettings();
+            ApplyVisibility();
+            Overlay.UpdateVisual();
+        }
+
+        /// <summary>
+        /// Adds one title-bar line row: a dropdown to pick which content
+        /// this line shows, plus a button to remove the row entirely. New
+        /// rows are appended to the end, so the order rows appear in this
+        /// list is also the order they're displayed in on the overlay.
+        /// </summary>
+        private void AddHeaderLineRow(int selectedOptionIndex)
+        {
+            var row = new FlowLayoutPanel { FlowDirection = FlowDirection.LeftToRight, WrapContents = false, AutoSize = true, Margin = new Padding(0, 0, 0, 2) };
+
+            var combo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 220, Margin = new Padding(0, 2, 4, 0) };
+            foreach (var opt in HeaderLineOptions)
+                combo.Items.Add(opt);
+            combo.SelectedIndex = (selectedOptionIndex >= 0 && selectedOptionIndex < HeaderLineOptions.Length) ? selectedOptionIndex : 0;
+            combo.SelectedIndexChanged += (s, e) => ApplyAppearanceSettings();
+            row.Controls.Add(combo);
+
+            var btnRemove = new Button { Text = "Remove", AutoSize = true, Margin = new Padding(0) };
+            btnRemove.Click += (s, e) =>
+            {
+                _headerLinesContainer.Controls.Remove(row);
+                _headerLineCombos.Remove(combo);
+                ApplyAppearanceSettings();
+            };
+            row.Controls.Add(btnRemove);
+
+            _headerLineCombos.Add(combo);
+            _headerLinesContainer.Controls.Add(row);
+            DarkTheme.Apply(row);
+        }
+
         // ----- Behavior -----
 
         private void ApplyVisibility()
@@ -1447,12 +1700,9 @@ namespace SqueezeParseMini
             Overlay.Bars.ShowCureCount = (metric == ParseMetric.HPSCures || metric == ParseMetric.ZoneHPSCures);
 
             Overlay.OverlayOpacity = _trkOpacity.Value;
+            _lblOpacityPercent.Text = Math.Round(_trkOpacity.Value / 255.0 * 100) + "%";
 
-            int headerLineCount = 0;
-            if (_chkHeaderLine1.Checked) headerLineCount++;
-            if (_chkHeaderLine2.Checked) headerLineCount++;
-            if (_chkHeaderLine3.Checked) headerLineCount++;
-            Overlay.Bars.HeaderHeight = headerLineCount * 17;
+            Overlay.Bars.HeaderHeight = _headerLineCombos.Count * 17;
 
             Overlay.Bars.BarBackColor = BarBackColorValues[ClampIndex(_cmbBarBackColor.SelectedIndex, BarBackColorValues.Length)];
 
@@ -1511,15 +1761,17 @@ namespace SqueezeParseMini
                 case 2: return ParseMetric.ZoneDPS;
                 case 3: return ParseMetric.ZoneDamage;
                 case 4: return ParseMetric.PersonalDPS;
-                case 5: return ParseMetric.EncHPS;
-                case 6: return ParseMetric.HPSCures;
-                case 7: return ParseMetric.Healed;
-                case 8: return ParseMetric.ZoneHPS;
-                case 9: return ParseMetric.ZoneHPSCures;
-                case 10: return ParseMetric.ZoneHealed;
-                case 11: return ParseMetric.PersonalHPS;
-                case 12: return ParseMetric.HybridDpsHpsCures;
-                case 13: return ParseMetric.HybridHpsDpsCures;
+                case 5: return ParseMetric.ZonePersonalDPS;
+                case 6: return ParseMetric.EncHPS;
+                case 7: return ParseMetric.HPSCures;
+                case 8: return ParseMetric.Healed;
+                case 9: return ParseMetric.ZoneHPS;
+                case 10: return ParseMetric.ZoneHPSCures;
+                case 11: return ParseMetric.ZoneHealed;
+                case 12: return ParseMetric.PersonalHPS;
+                case 13: return ParseMetric.ZonePersonalHPS;
+                case 14: return ParseMetric.HybridDpsHpsCures;
+                case 15: return ParseMetric.HybridHpsDpsCures;
                 default: return ParseMetric.EncDPS;
             }
         }
@@ -1527,6 +1779,11 @@ namespace SqueezeParseMini
         private static bool IsPersonalMetric(ParseMetric metric)
         {
             return metric == ParseMetric.PersonalDPS || metric == ParseMetric.PersonalHPS;
+        }
+
+        private static bool IsZonePersonalMetric(ParseMetric metric)
+        {
+            return metric == ParseMetric.ZonePersonalDPS || metric == ParseMetric.ZonePersonalHPS;
         }
 
         private static bool IsZoneMetric(ParseMetric metric)
@@ -1544,12 +1801,14 @@ namespace SqueezeParseMini
                 case ParseMetric.DPS:
                 case ParseMetric.ZoneDPS:
                 case ParseMetric.PersonalDPS:
+                case ParseMetric.ZonePersonalDPS:
                     return " dps";
                 case ParseMetric.EncHPS:
                 case ParseMetric.HPSCures:
                 case ParseMetric.ZoneHPS:
                 case ParseMetric.ZoneHPSCures:
                 case ParseMetric.PersonalHPS:
+                case ParseMetric.ZonePersonalHPS:
                     return " hps";
                 default:
                     return "";
@@ -1609,6 +1868,7 @@ namespace SqueezeParseMini
                 ParseMetric metric = SelectedMetric();
                 bool zoneWide = IsZoneMetric(metric);
                 bool personal = IsPersonalMetric(metric);
+                bool zonePersonal = IsZonePersonalMetric(metric);
                 bool isHybridDpsFirst = metric == ParseMetric.HybridDpsHpsCures;
                 bool isHybridHpsFirst = metric == ParseMetric.HybridHpsDpsCures;
                 bool isHybrid = isHybridDpsFirst || isHybridHpsFirst;
@@ -1625,6 +1885,16 @@ namespace SqueezeParseMini
                         return;
                     }
                     scored = BuildZoneWideScores(zone, metric);
+                }
+                else if (zonePersonal)
+                {
+                    if (zone == null)
+                    {
+                        Overlay.Bars.SetData(new List<SqueezeEntry>(), "No active zone");
+                        Overlay.UpdateVisual();
+                        return;
+                    }
+                    scored = BuildZonePersonalAbilityScores(zone, selfName, metric);
                 }
                 else if (personal)
                 {
@@ -1725,25 +1995,56 @@ namespace SqueezeParseMini
                     string title = string.IsNullOrEmpty(encounter.Title) ? encounter.ZoneName : encounter.Title;
 
                     int totalCures = 0;
+                    double bestHit = 0;
+                    string bestHitName = "";
+                    double bestHeal = 0;
+                    string bestHealName = "";
+
                     foreach (CombatantData c in encounter.Items.Values)
                     {
-                        if (c != null) totalCures += c.CureDispels;
+                        if (c == null || string.IsNullOrEmpty(c.Name)) continue;
+                        totalCures += c.CureDispels;
+
+                        DamageTypeData dmgCat = FindOutgoingCategory(c, "Outgoing Damage", "damage");
+                        if (dmgCat != null && dmgCat.MaxHit > bestHit)
+                        {
+                            bestHit = dmgCat.MaxHit;
+                            bestHitName = c.Name;
+                        }
+
+                        DamageTypeData healCat = FindOutgoingCategory(c, "Healed (Out)", "heal");
+                        if (healCat != null && healCat.MaxHit > bestHeal)
+                        {
+                            bestHeal = healCat.MaxHit;
+                            bestHealName = c.Name;
+                        }
                     }
+
                     double totalHps = encounter.Duration.TotalSeconds > 0
                         ? encounter.Healed / encounter.Duration.TotalSeconds
                         : 0;
 
-                    string line1 = encounter.DurationS + " | " + title;
-                    string line2 = SqueezeBarsRenderer.FormatValue(encounter.Damage) + " dmg"
+                    string[] contentLines = new string[5];
+                    contentLines[0] = encounter.DurationS + " | " + title;
+                    contentLines[1] = SqueezeBarsRenderer.FormatValue(encounter.Damage) + " dmg"
                         + " | " + SqueezeBarsRenderer.FormatValue(encounter.DPS) + " dps";
-                    string line3 = SqueezeBarsRenderer.FormatValue(encounter.Healed) + " hld"
+                    contentLines[2] = SqueezeBarsRenderer.FormatValue(encounter.Healed) + " hld"
                         + " | " + SqueezeBarsRenderer.FormatValue(totalHps) + " hps"
                         + " | " + totalCures + "c";
+                    contentLines[3] = bestHit > 0
+                        ? "Highest hit: " + bestHitName + " | " + SqueezeBarsRenderer.FormatValue(bestHit)
+                        : "Highest hit: n/a";
+                    contentLines[4] = bestHeal > 0
+                        ? "Highest heal: " + bestHealName + " | " + SqueezeBarsRenderer.FormatValue(bestHeal)
+                        : "Highest heal: n/a";
 
                     var headerLines = new List<string>();
-                    if (_chkHeaderLine1.Checked) headerLines.Add(line1);
-                    if (_chkHeaderLine2.Checked) headerLines.Add(line2);
-                    if (_chkHeaderLine3.Checked) headerLines.Add(line3);
+                    foreach (ComboBox combo in _headerLineCombos)
+                    {
+                        int idx = combo.SelectedIndex;
+                        if (idx >= 0 && idx < contentLines.Length)
+                            headerLines.Add(contentLines[idx]);
+                    }
                     headerText = string.Join("\n", headerLines.ToArray());
                 }
                 else
@@ -1839,7 +2140,73 @@ namespace SqueezeParseMini
             return scored;
         }
 
+        /// <summary>
+        /// Same per-ability breakdown as BuildPersonalAbilityScores, but
+        /// summed across every encounter in the zone rather than just the
+        /// active one - each ability's total amount and total duration are
+        /// accumulated separately across encounters, then divided once at
+        /// the end (same pattern as BuildZoneWideScores, just keyed by
+        /// ability name instead of combatant name).
+        /// </summary>
+        private static List<CombatantScore> BuildZonePersonalAbilityScores(ZoneData zone, string selfName, ParseMetric metric)
+        {
+            var totals = new Dictionary<string, ZoneAggregate>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (EncounterData enc in zone.Items)
+            {
+                if (enc == null) continue;
+
+                CombatantData self = enc.GetCombatant(selfName);
+                if (self == null) continue;
+
+                SortedList<string, AttackType> abilities = metric == ParseMetric.ZonePersonalHPS
+                    ? FindOutgoingAbilities(self, "Healed (Out)", "heal")
+                    : FindOutgoingAbilities(self, "Outgoing Damage", "damage");
+
+                if (abilities == null) continue;
+
+                foreach (AttackType at in abilities.Values)
+                {
+                    if (at == null || string.IsNullOrEmpty(at.Type)) continue;
+
+                    ZoneAggregate agg;
+                    if (!totals.TryGetValue(at.Type, out agg))
+                    {
+                        agg = new ZoneAggregate();
+                        totals[at.Type] = agg;
+                    }
+
+                    agg.Damage += at.Damage;
+                    agg.DurationSeconds += at.Duration.TotalSeconds;
+                }
+            }
+
+            var scored = new List<CombatantScore>();
+            foreach (KeyValuePair<string, ZoneAggregate> kvp in totals)
+            {
+                ZoneAggregate agg = kvp.Value;
+                double value = agg.DurationSeconds > 0 ? agg.Damage / agg.DurationSeconds : 0;
+                if (value <= 0) continue;
+                scored.Add(new CombatantScore { Name = kvp.Key, Value = value });
+            }
+
+            return scored;
+        }
+
         private static SortedList<string, AttackType> FindOutgoingAbilities(CombatantData c, string exactName, string fallbackContains)
+        {
+            DamageTypeData dtd = FindOutgoingCategory(c, exactName, fallbackContains);
+            return dtd != null ? dtd.Items : null;
+        }
+
+        /// <summary>
+        /// Looks for a combatant's outgoing category (e.g. "Outgoing Damage",
+        /// "Healed (Out)") by exact name first, falling back to a loose
+        /// substring match only if the exact category isn't present. Used
+        /// both for the per-ability breakdown (via its .Items) and for
+        /// category-level stats like MaxHit (the highest single hit/heal).
+        /// </summary>
+        private static DamageTypeData FindOutgoingCategory(CombatantData c, string exactName, string fallbackContains)
         {
             if (c == null || c.Items == null) return null;
 
@@ -1847,7 +2214,7 @@ namespace SqueezeParseMini
             {
                 if (dtd == null || string.IsNullOrEmpty(dtd.Type)) continue;
                 if (string.Equals(dtd.Type, exactName, StringComparison.OrdinalIgnoreCase))
-                    return dtd.Items;
+                    return dtd;
             }
 
             if (!string.IsNullOrEmpty(fallbackContains))
@@ -1856,7 +2223,7 @@ namespace SqueezeParseMini
                 {
                     if (dtd == null || string.IsNullOrEmpty(dtd.Type)) continue;
                     if (dtd.Type.ToLowerInvariant().Contains(fallbackContains))
-                        return dtd.Items;
+                        return dtd;
                 }
             }
 
@@ -1905,9 +2272,16 @@ namespace SqueezeParseMini
             AttachChildNode(node, "ShowPercent", _chkShowPercent.Checked.ToString());
             AttachChildNode(node, "FadeEnabled", _chkFadeEnabled.Checked.ToString());
             AttachChildNode(node, "FadeSeconds", _nudFadeSeconds.Value.ToString());
-            AttachChildNode(node, "HeaderLine1", _chkHeaderLine1.Checked.ToString());
-            AttachChildNode(node, "HeaderLine2", _chkHeaderLine2.Checked.ToString());
-            AttachChildNode(node, "HeaderLine3", _chkHeaderLine3.Checked.ToString());
+
+            System.Xml.XmlElement headerLinesNode = doc.CreateElement("HeaderLines");
+            node.AppendChild(headerLinesNode);
+            foreach (ComboBox combo in _headerLineCombos)
+            {
+                System.Xml.XmlElement lineNode = doc.CreateElement("Line");
+                lineNode.InnerText = combo.SelectedIndex.ToString();
+                headerLinesNode.AppendChild(lineNode);
+            }
+
             AttachChildNode(node, "ShowHeaderBackground", _chkShowHeaderBackground.Checked.ToString());
             AttachChildNode(node, "HeaderBackColor", _cmbHeaderBackColor.SelectedIndex.ToString());
             AttachChildNode(node, "HeaderTextColor", _cmbHeaderTextColor.SelectedIndex.ToString());
@@ -1946,9 +2320,27 @@ namespace SqueezeParseMini
             _chkShowPercent.Checked = RetrieveBool(node, "ShowPercent", _chkShowPercent.Checked);
             _chkFadeEnabled.Checked = RetrieveBool(node, "FadeEnabled", _chkFadeEnabled.Checked);
             _nudFadeSeconds.Value = RetrieveDecimal(node, "FadeSeconds", _nudFadeSeconds.Value, _nudFadeSeconds.Minimum, _nudFadeSeconds.Maximum);
-            _chkHeaderLine1.Checked = RetrieveBool(node, "HeaderLine1", _chkHeaderLine1.Checked);
-            _chkHeaderLine2.Checked = RetrieveBool(node, "HeaderLine2", _chkHeaderLine2.Checked);
-            _chkHeaderLine3.Checked = RetrieveBool(node, "HeaderLine3", _chkHeaderLine3.Checked);
+
+            _headerLinesContainer.Controls.Clear();
+            _headerLineCombos.Clear();
+            System.Xml.XmlNodeList lineNodes = node.SelectNodes("HeaderLines/Line");
+            if (lineNodes != null && lineNodes.Count > 0)
+            {
+                foreach (System.Xml.XmlNode lineNode in lineNodes)
+                {
+                    int idx;
+                    if (int.TryParse(lineNode.InnerText, out idx))
+                        AddHeaderLineRow(idx);
+                }
+            }
+            else
+            {
+                // Old settings file (predates the add/remove title list) or a
+                // window with no lines saved yet - fall back to the default
+                // of just the time/encounter line.
+                AddHeaderLineRow(0);
+            }
+
             _chkShowHeaderBackground.Checked = RetrieveBool(node, "ShowHeaderBackground", _chkShowHeaderBackground.Checked);
             _cmbHeaderBackColor.SelectedIndex = RetrieveInt(node, "HeaderBackColor", _cmbHeaderBackColor.SelectedIndex, 0, _cmbHeaderBackColor.Items.Count - 1);
             _cmbHeaderTextColor.SelectedIndex = RetrieveInt(node, "HeaderTextColor", _cmbHeaderTextColor.SelectedIndex, 0, _cmbHeaderTextColor.Items.Count - 1);
@@ -2015,7 +2407,7 @@ namespace SqueezeParseMini
     {
         // Bump this with every release you push, and keep version.txt in the
         // repo (see VersionCheckUrl below) in sync with it.
-        private const string CurrentVersion = "1.0.2";
+        private const string CurrentVersion = "1.0.3";
 
         // Fill these in with your actual GitHub repo details once it's set up:
         // - VersionCheckUrl should point at a plain text file containing just
@@ -2038,8 +2430,6 @@ namespace SqueezeParseMini
         private GroupBox _generalGroup;
         private Button _btnSaveSettings;
 
-        private Label _lblVersion;
-        private Label _lblUpdateStatus;
         private Button _btnCheckUpdate;
         private Button _btnDownloadUpdate;
         private TextBox _txtLocalFilePath;
@@ -2057,13 +2447,13 @@ namespace SqueezeParseMini
 
             BuildRootUI(pluginScreenSpace);
 
-            // Forces the label's actual window handle to exist right away
+            // Forces the button's actual window handle to exist right away
             // instead of whenever ACT first paints this tab. Without this,
             // the background update-check thread's IsHandleCreated guard
             // (there to avoid a cross-thread Invoke crash) can find no
             // handle yet on the very first automatic check and silently
-            // drop the result, leaving the label stuck on "Checking...".
-            IntPtr forceHandleCreation = _lblUpdateStatus.Handle;
+            // drop the result, leaving the button stuck on "Checking...".
+            IntPtr forceHandleCreation = _btnDownloadUpdate.Handle;
 
             if (!LoadSettings())
             {
@@ -2080,14 +2470,6 @@ namespace SqueezeParseMini
                     ActGlobals.oFormActMain.AppDataFolder.FullName, "Plugins", "SqueezeParseMini.cs");
             }
 
-            // The tab content isn't necessarily laid out yet the moment
-            // InitPlugin runs - a single deferred attempt sometimes lands too
-            // early and never gets retried, leaving General stuck at its
-            // narrow placeholder width (and clipping whatever wrapped into
-            // the rows below the visible area, like the update-check
-            // controls). Keep retrying on a short timer until it succeeds.
-            StartGeneralWidthSyncRetries();
-
             CheckForUpdates();
 
             _refreshTimer = new Timer { Interval = 500 };
@@ -2103,12 +2485,6 @@ namespace SqueezeParseMini
             {
                 _refreshTimer.Stop();
                 _refreshTimer.Dispose();
-            }
-
-            if (_generalWidthSyncTimer != null)
-            {
-                _generalWidthSyncTimer.Stop();
-                _generalWidthSyncTimer.Dispose();
             }
 
             SaveSettings();
@@ -2131,49 +2507,56 @@ namespace SqueezeParseMini
         {
             pluginScreenSpace.Text = "SqueezeParseMini";
 
-            // TabControl (Fill) is added to the parent BEFORE General (Top).
+            // tabHost (Fill) is added to the parent BEFORE General (Top).
             // WinForms resolves docked siblings in reverse of add order - the
             // last-added docked control claims its edge first - so adding
             // Fill first and Top last is what keeps them from overlapping
-            // (adding Top first was what let the TabControl's Fill claim the
-            // whole client area and cover the tab strip).
-            _tabControl = new TabControl { Dock = DockStyle.Fill, DrawMode = TabDrawMode.OwnerDrawFixed };
-            _tabControl.DrawItem += TabControl_DrawItem;
-            _tabControl.SelectedIndexChanged += (s, e) => SyncGeneralWidth();
-            pluginScreenSpace.Controls.Add(_tabControl);
+            // (adding Top first was what let Fill claim the whole client
+            // area and cover the tab strip).
+            //
+            // The TabControl itself is wrapped in tabHost rather than docked
+            // directly: it draws its own native body border regardless of
+            // Appearance, and it's noticeably heavier than a GroupBox's
+            // border. Sizing the TabControl a few px larger than tabHost and
+            // shifting it up/left pushes that native border outside
+            // tabHost's clipped visible area - clipping it out entirely
+            // rather than just trying to visually thin it.
+            var tabHost = new Panel { Dock = DockStyle.Fill };
+            pluginScreenSpace.Controls.Add(tabHost);
 
-            var generalBand = new Panel { Dock = DockStyle.Top, Height = 130 };
+            _tabControl = new TabControl { DrawMode = TabDrawMode.OwnerDrawFixed, SizeMode = TabSizeMode.Normal, Appearance = TabAppearance.FlatButtons };
+            _tabControl.DrawItem += TabControl_DrawItem;
+            tabHost.Controls.Add(_tabControl);
+
+            const int tabBorderClip = 3;
+            EventHandler resizeTabControl = delegate
+            {
+                _tabControl.Location = new Point(-tabBorderClip, -tabBorderClip);
+                _tabControl.Size = new Size(tabHost.ClientSize.Width + tabBorderClip * 2, tabHost.ClientSize.Height + tabBorderClip * 2);
+            };
+            tabHost.Resize += resizeTabControl;
+            resizeTabControl(null, EventArgs.Empty);
+
+            var generalBand = new Panel { Dock = DockStyle.Top, Height = 180, Padding = new Padding(8, 4, 8, 4) };
 
             _generalGroup = new GroupBox
             {
                 Text = "General",
-                Location = new Point(8, 4),
-                Width = 400, // placeholder - SyncGeneralWidth() sizes this to match the Self section once laid out
-                Height = 120,
+                Dock = DockStyle.Fill,
                 Padding = new Padding(8)
             };
 
-            var generalFlow = new FlowLayoutPanel
+            var generalRows = new FlowLayoutPanel
             {
                 Dock = DockStyle.Fill,
-                FlowDirection = FlowDirection.LeftToRight,
-                WrapContents = true,
+                FlowDirection = FlowDirection.TopDown,
+                WrapContents = false,
                 AutoSize = true
             };
 
-            _btnAddWindow = new Button { Text = "Add parse window", AutoSize = true, Margin = new Padding(0, 4, 12, 0) };
-            _btnAddWindow.Click += (s, e) => { AddWindow(null); SaveSettings(); SyncGeneralWidth(); };
-            generalFlow.Controls.Add(_btnAddWindow);
-
-            _btnSaveSettings = new Button { Text = "Save settings", AutoSize = true, Margin = new Padding(0, 4, 12, 0) };
-            _btnSaveSettings.Click += (s, e) =>
-            {
-                SaveSettings();
-                _pluginStatusText.Text = "SqueezeParseMini: settings saved";
-            };
-            generalFlow.Controls.Add(_btnSaveSettings);
-
-            _chkUnlockAll = new CheckBox { Text = "Unlock to move (all windows)", AutoSize = true, Margin = new Padding(0, 8, 12, 0) };
+            // Row 1: Unlock all windows
+            var row1 = CreateGeneralRow();
+            _chkUnlockAll = new CheckBox { Text = "Unlock all windows", AutoSize = true, Margin = new Padding(0, 4, 12, 0) };
             _chkUnlockAll.CheckedChanged += (s, e) =>
             {
                 foreach (ParseWindowController w in _windows)
@@ -2186,30 +2569,72 @@ namespace SqueezeParseMini
                 else
                     _gridOverlay.Hide();
             };
-            generalFlow.Controls.Add(_chkUnlockAll);
+            row1.Controls.Add(_chkUnlockAll);
+            generalRows.Controls.Add(row1);
 
-            _lblVersion = new Label { Text = "Version: " + CurrentVersion, AutoSize = true, Margin = new Padding(0, 8, 4, 0) };
-            generalFlow.Controls.Add(_lblVersion);
+            // Row 2: Save settings | Add parse window
+            var row2 = CreateGeneralRow();
+            _btnSaveSettings = new Button { Text = "Save settings", AutoSize = true, Margin = new Padding(0, 4, 12, 0) };
+            _btnSaveSettings.Click += (s, e) =>
+            {
+                SaveSettings();
+                _pluginStatusText.Text = "SqueezeParseMini: settings saved";
+            };
+            row2.Controls.Add(_btnSaveSettings);
 
-            _btnCheckUpdate = new Button { Text = "Check for updates", AutoSize = true, Margin = new Padding(12, 4, 12, 0) };
+            _btnAddWindow = new Button { Text = "Add parse window", AutoSize = true, Margin = new Padding(0, 4, 0, 0) };
+            _btnAddWindow.Click += (s, e) => { AddWindow(null); SaveSettings(); };
+            row2.Controls.Add(_btnAddWindow);
+            generalRows.Controls.Add(row2);
+
+            // Row 3: Check for updates | Download/status button
+            var row3 = CreateGeneralRow();
+            _btnCheckUpdate = new Button { Text = "Check for updates", AutoSize = true, Margin = new Padding(0, 4, 12, 0) };
             _btnCheckUpdate.Click += (s, e) => CheckForUpdates();
-            generalFlow.Controls.Add(_btnCheckUpdate);
+            row3.Controls.Add(_btnCheckUpdate);
 
-            _lblUpdateStatus = new Label { Text = "Not checked yet", AutoSize = true, ForeColor = Color.Gray, Margin = new Padding(0, 8, 12, 0) };
-            generalFlow.Controls.Add(_lblUpdateStatus);
-
-            _btnDownloadUpdate = new Button { Text = "Download update", AutoSize = true, Enabled = false, Margin = new Padding(0, 4, 12, 0) };
+            _btnDownloadUpdate = new Button { Text = "Not checked yet", AutoSize = true, Enabled = false, Margin = new Padding(0, 4, 0, 0) };
             _btnDownloadUpdate.Click += (s, e) => DownloadUpdate();
-            generalFlow.Controls.Add(_btnDownloadUpdate);
+            row3.Controls.Add(_btnDownloadUpdate);
+            generalRows.Controls.Add(row3);
 
-            var lblFilePath = new Label { Text = "Plugin file path:", AutoSize = true, Margin = new Padding(12, 8, 4, 0) };
-            generalFlow.Controls.Add(lblFilePath);
+            // Save settings / Add parse window / Check for updates / Download
+            // all get the same width - whichever of their possible texts is
+            // widest (the Download button's text changes at runtime between
+            // several states, so every one of those is measured too, not
+            // just whatever it happens to say right now).
+            string[] generalButtonTexts =
+            {
+                "Save settings", "Add parse window", "Check for updates",
+                "Not checked yet", "Checking...", "Couldn't check",
+                "Up to date (v" + CurrentVersion + ")",
+                "Download v99.99.99", "Downloading...", "Download failed", "Downloaded v99.99.99"
+            };
+            int generalButtonWidth = 0;
+            foreach (string t in generalButtonTexts)
+            {
+                int w = TextRenderer.MeasureText(t, _btnSaveSettings.Font).Width;
+                if (w > generalButtonWidth) generalButtonWidth = w;
+            }
+            generalButtonWidth += 30; // breathing room so text never sits flush against the button edge
 
-            _txtLocalFilePath = new TextBox { Width = 220, Margin = new Padding(0, 4, 4, 0) };
+            _btnSaveSettings.AutoSize = false; _btnSaveSettings.Width = generalButtonWidth;
+            _btnAddWindow.AutoSize = false; _btnAddWindow.Width = generalButtonWidth;
+            _btnCheckUpdate.AutoSize = false; _btnCheckUpdate.Width = generalButtonWidth;
+            _btnDownloadUpdate.AutoSize = false; _btnDownloadUpdate.Width = generalButtonWidth;
+
+            // Row 4: Plugin file path | Browse - file path stays a wide,
+            // fixed-size box (not stretched/equal-width) so the whole path
+            // is actually readable.
+            var row4 = CreateGeneralRow();
+            var lblFilePath = new Label { Text = "Plugin file path:", AutoSize = true, Margin = new Padding(0, 8, 4, 0) };
+            row4.Controls.Add(lblFilePath);
+
+            _txtLocalFilePath = new TextBox { Width = 660, Margin = new Padding(0, 4, 4, 0) };
             _txtLocalFilePath.TextChanged += (s, e) => SaveSettings();
-            generalFlow.Controls.Add(_txtLocalFilePath);
+            row4.Controls.Add(_txtLocalFilePath);
 
-            var btnBrowsePath = new Button { Text = "Browse...", AutoSize = true, Margin = new Padding(0, 4, 12, 0) };
+            var btnBrowsePath = new Button { Text = "Browse...", AutoSize = true, Margin = new Padding(0, 4, 0, 0) };
             btnBrowsePath.Click += (s, e) =>
             {
                 using (var dlg = new OpenFileDialog())
@@ -2227,64 +2652,33 @@ namespace SqueezeParseMini
                     }
                 }
             };
-            generalFlow.Controls.Add(btnBrowsePath);
+            row4.Controls.Add(btnBrowsePath);
+            generalRows.Controls.Add(row4);
 
-            _generalGroup.Controls.Add(generalFlow);
+            _generalGroup.Controls.Add(generalRows);
             generalBand.Controls.Add(_generalGroup);
             pluginScreenSpace.Controls.Add(generalBand);
+
+            generalRows.PerformLayout();
+            int computedHeight = generalRows.PreferredSize.Height + 28;
+            if (computedHeight < 150) computedHeight = 150;
+            _generalGroup.Height = computedHeight;
+            generalBand.Height = computedHeight + 10;
+
+            pluginScreenSpace.BackColor = DarkTheme.WindowBack;
+            tabHost.BackColor = DarkTheme.WindowBack;
+            DarkTheme.Apply(generalBand);
         }
 
-        /// <summary>
-        /// Resizes General so its right edge lines up with the right edge of
-        /// the currently selected tab's "Self" section, instead of guessing
-        /// a fixed column count (sections wrap into a different number of
-        /// columns depending on total content height).
-        /// </summary>
-        private Timer _generalWidthSyncTimer;
-        private int _generalWidthSyncAttempts;
-
-        /// <summary>
-        /// Calls SyncGeneralWidth on a short repeating timer until it
-        /// reports success (or a reasonable attempt cap is hit), instead of
-        /// relying on a single deferred call that can land before the tab
-        /// content has actually been laid out.
-        /// </summary>
-        private void StartGeneralWidthSyncRetries()
+        private static FlowLayoutPanel CreateGeneralRow()
         {
-            _generalWidthSyncAttempts = 0;
-
-            _generalWidthSyncTimer = new Timer { Interval = 250 };
-            _generalWidthSyncTimer.Tick += (s, e) =>
+            return new FlowLayoutPanel
             {
-                _generalWidthSyncAttempts++;
-                bool succeeded = SyncGeneralWidth();
-
-                if (succeeded || _generalWidthSyncAttempts >= 20)
-                {
-                    _generalWidthSyncTimer.Stop();
-                    _generalWidthSyncTimer.Dispose();
-                    _generalWidthSyncTimer = null;
-                }
+                FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = false,
+                AutoSize = true,
+                Margin = new Padding(0, 0, 0, 2)
             };
-            _generalWidthSyncTimer.Start();
-        }
-
-        private bool SyncGeneralWidth()
-        {
-            if (_generalGroup == null || _tabControl.SelectedTab == null) return false;
-
-            ParseWindowController active = null;
-            foreach (ParseWindowController w in _windows)
-            {
-                if (w.Page == _tabControl.SelectedTab) { active = w; break; }
-            }
-            if (active == null || active.SelfGroupBox == null) return false;
-
-            int measuredRight = active.SelfGroupBox.Right;
-            if (measuredRight < 300) return false; // not laid out yet - try again later
-
-            _generalGroup.Width = measuredRight + 16;
-            return true;
         }
 
         private ParseWindowController AddWindow(string presetName)
@@ -2302,6 +2696,7 @@ namespace SqueezeParseMini
             var controller = new ParseWindowController(name);
             controller.BuildUI(page);
             controller.Overlay.IsUnlocked = _chkUnlockAll != null && _chkUnlockAll.Checked;
+            DarkTheme.Apply(page);
 
             controller.BtnRemoveWindow.Click += (s, e) => RemoveWindow(controller);
 
@@ -2326,7 +2721,6 @@ namespace SqueezeParseMini
             _tabControl.TabPages.Remove(controller.Page);
             controller.Dispose();
             SaveSettings();
-            SyncGeneralWidth();
         }
 
         private void TabControl_DrawItem(object sender, DrawItemEventArgs e)
@@ -2334,15 +2728,8 @@ namespace SqueezeParseMini
             if (e.Index < 0 || e.Index >= _tabControl.TabPages.Count) return;
 
             TabPage page = _tabControl.TabPages[e.Index];
-            bool selected = e.Index == _tabControl.SelectedIndex;
 
-            Color backColor = selected ? Color.FromArgb(255, 60, 60, 60) : Color.FromArgb(255, 40, 40, 40);
-            using (var backBrush = new SolidBrush(backColor))
-            {
-                e.Graphics.FillRectangle(backBrush, e.Bounds);
-            }
-
-            TextRenderer.DrawText(e.Graphics, page.Text, _tabControl.Font, e.Bounds, Color.White,
+            TextRenderer.DrawText(e.Graphics, page.Text, _tabControl.Font, e.Bounds, Color.Black,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
         }
 
@@ -2433,14 +2820,15 @@ namespace SqueezeParseMini
 
         /// <summary>
         /// Fetches VersionCheckUrl (expected to contain just a version
-        /// number) on a background thread and updates the status label when
-        /// it comes back. Safe to call both passively on load and from the
-        /// "Check for updates" button.
+        /// number) on a background thread and updates the Download button's
+        /// text/color when it comes back. Safe to call both passively on
+        /// load and from the "Check for updates" button.
         /// </summary>
         private void CheckForUpdates()
         {
-            _lblUpdateStatus.Text = "Checking...";
-            _lblUpdateStatus.ForeColor = Color.Gray;
+            _btnDownloadUpdate.Text = "Checking...";
+            _btnDownloadUpdate.ForeColor = Color.Gray;
+            _btnDownloadUpdate.Enabled = false;
 
             System.Threading.ThreadPool.QueueUserWorkItem(delegate
             {
@@ -2461,9 +2849,9 @@ namespace SqueezeParseMini
                     errorMessage = ex.Message;
                 }
 
-                if (_lblUpdateStatus.IsHandleCreated)
+                if (_btnDownloadUpdate.IsHandleCreated)
                 {
-                    _lblUpdateStatus.Invoke(new MethodInvoker(delegate
+                    _btnDownloadUpdate.Invoke(new MethodInvoker(delegate
                     {
                         ApplyUpdateCheckResult(remoteVersion, errorMessage);
                     }));
@@ -2475,8 +2863,8 @@ namespace SqueezeParseMini
         {
             if (errorMessage != null || string.IsNullOrEmpty(remoteVersion))
             {
-                _lblUpdateStatus.Text = "Couldn't check for updates";
-                _lblUpdateStatus.ForeColor = Color.Gray;
+                _btnDownloadUpdate.Text = "Couldn't check";
+                _btnDownloadUpdate.ForeColor = Color.Gray;
                 _btnDownloadUpdate.Enabled = false;
                 return;
             }
@@ -2485,14 +2873,14 @@ namespace SqueezeParseMini
 
             if (string.Equals(remoteVersion, CurrentVersion, StringComparison.OrdinalIgnoreCase))
             {
-                _lblUpdateStatus.Text = "Up to date (v" + CurrentVersion + ")";
-                _lblUpdateStatus.ForeColor = Color.Green;
+                _btnDownloadUpdate.Text = "Up to date (v" + CurrentVersion + ")";
+                _btnDownloadUpdate.ForeColor = Color.LightGreen;
                 _btnDownloadUpdate.Enabled = false;
             }
             else
             {
-                _lblUpdateStatus.Text = "Update available: v" + remoteVersion;
-                _lblUpdateStatus.ForeColor = Color.OrangeRed;
+                _btnDownloadUpdate.Text = "Download v" + remoteVersion;
+                _btnDownloadUpdate.ForeColor = Color.Orange;
                 _btnDownloadUpdate.Enabled = true;
             }
         }
@@ -2525,8 +2913,8 @@ namespace SqueezeParseMini
             }
 
             _btnDownloadUpdate.Enabled = false;
-            _lblUpdateStatus.Text = "Downloading...";
-            _lblUpdateStatus.ForeColor = Color.Gray;
+            _btnDownloadUpdate.Text = "Downloading...";
+            _btnDownloadUpdate.ForeColor = Color.Gray;
 
             System.Threading.ThreadPool.QueueUserWorkItem(delegate
             {
@@ -2547,21 +2935,21 @@ namespace SqueezeParseMini
                     errorMessage = ex.Message;
                 }
 
-                if (_lblUpdateStatus.IsHandleCreated)
+                if (_btnDownloadUpdate.IsHandleCreated)
                 {
-                    _lblUpdateStatus.Invoke(new MethodInvoker(delegate
+                    _btnDownloadUpdate.Invoke(new MethodInvoker(delegate
                     {
                         if (errorMessage != null)
                         {
-                            _lblUpdateStatus.Text = "Update failed";
-                            _lblUpdateStatus.ForeColor = Color.Red;
+                            _btnDownloadUpdate.Text = "Download failed";
+                            _btnDownloadUpdate.ForeColor = Color.Red;
                             _btnDownloadUpdate.Enabled = true;
                             MessageBox.Show("Update failed: " + errorMessage, "SqueezeParseMini", MessageBoxButtons.OK, MessageBoxIcon.Error);
                         }
                         else
                         {
-                            _lblUpdateStatus.Text = "Downloaded v" + _latestKnownVersion;
-                            _lblUpdateStatus.ForeColor = Color.Green;
+                            _btnDownloadUpdate.Text = "Downloaded v" + _latestKnownVersion;
+                            _btnDownloadUpdate.ForeColor = Color.LightGreen;
                             MessageBox.Show(
                                 "SqueezeParseMini has been updated to v" + _latestKnownVersion + " on disk.\n\n" +
                                 "Go to ACT's Plugins -> Plugin Listing tab, uncheck SqueezeParseMini, then check it again to load the new version.",
