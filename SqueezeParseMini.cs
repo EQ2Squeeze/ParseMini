@@ -116,6 +116,16 @@ namespace SqueezeParseMini
 
         public bool ShowUnlockedOutline;
 
+        /// <summary>
+        /// The configured "Rows" setting - while ShowUnlockedOutline is true,
+        /// sizing uses at least this many rows/columns instead of however
+        /// many entries are actually present, so unlocking previews the
+        /// full space the overlay is configured to take up (e.g. 12 rows
+        /// configured but only 2 people currently in combat still shows/
+        /// outlines room for all 12).
+        /// </summary>
+        public int PreviewRowCount;
+
         public SqueezeBarsRenderer()
         {
             BarBackColor = Color.FromArgb(255, 30, 30, 30);
@@ -148,6 +158,7 @@ namespace SqueezeParseMini
 
             Width = 260;
             ShowUnlockedOutline = false;
+            PreviewRowCount = 0;
         }
 
         /// <summary>
@@ -157,6 +168,18 @@ namespace SqueezeParseMini
         {
             _entries = entries ?? new List<SqueezeEntry>();
             _headerText = headerText ?? "";
+        }
+
+        /// <summary>
+        /// Number of rows/columns to size for: the actual current entry
+        /// count normally, or at least PreviewRowCount while unlocked, so
+        /// the window (and its outline) previews the full configured size.
+        /// </summary>
+        private int EffectiveRowCount()
+        {
+            if (ShowUnlockedOutline && PreviewRowCount > _entries.Count)
+                return PreviewRowCount;
+            return _entries.Count;
         }
 
         /// <summary>
@@ -170,7 +193,7 @@ namespace SqueezeParseMini
         public int MeasureWidth()
         {
             if (!Portrait) return Width;
-            int barsWidth = _entries.Count * (BarHeight + BarGap);
+            int barsWidth = EffectiveRowCount() * (BarHeight + BarGap);
             int contentWidth = BarSpacing + barsWidth + BarSpacing;
             return Math.Max(contentWidth, MinPortraitWidth);
         }
@@ -184,7 +207,7 @@ namespace SqueezeParseMini
             if (Portrait)
                 return BarSpacing + HeaderHeight + Width + BarSpacing;
 
-            int barsHeight = _entries.Count * (BarHeight + BarGap);
+            int barsHeight = EffectiveRowCount() * (BarHeight + BarGap);
             return BarSpacing + HeaderHeight + barsHeight + BarSpacing;
         }
 
@@ -1672,9 +1695,24 @@ namespace SqueezeParseMini
 
         // ----- Behavior -----
 
+        private bool _forceHidden;
+
+        /// <summary>
+        /// Master override from General's "Hide all windows" checkbox - when
+        /// true, this window's overlay stays hidden regardless of its own
+        /// Show overlay checkbox. Setting it re-applies visibility
+        /// immediately so toggling the master checkbox takes effect right
+        /// away rather than waiting for some other change to trigger it.
+        /// </summary>
+        public void SetForceHidden(bool hidden)
+        {
+            _forceHidden = hidden;
+            ApplyVisibility();
+        }
+
         private void ApplyVisibility()
         {
-            if (_chkShowOverlay.Checked)
+            if (_chkShowOverlay.Checked && !_forceHidden)
             {
                 if (!Overlay.Visible)
                     Overlay.Show();
@@ -1688,6 +1726,7 @@ namespace SqueezeParseMini
         private void ApplyAppearanceSettings()
         {
             Overlay.Bars.Width = (int)_nudOverlayWidth.Value;
+            Overlay.Bars.PreviewRowCount = (int)_nudTopCount.Value;
             Overlay.Bars.BarHeight = (int)_nudBarHeight.Value;
             Overlay.Bars.BarGap = (int)_nudBarGap.Value;
             Overlay.Bars.ShowBorders = _chkShowBorders.Checked;
@@ -2132,6 +2171,7 @@ namespace SqueezeParseMini
             foreach (AttackType at in abilities.Values)
             {
                 if (at == null || string.IsNullOrEmpty(at.Type)) continue;
+                if (string.Equals(at.Type, "All", StringComparison.OrdinalIgnoreCase)) continue;
                 double val = at.EncDPS;
                 if (val <= 0) continue;
                 scored.Add(new CombatantScore { Name = at.Type, Value = val });
@@ -2168,6 +2208,7 @@ namespace SqueezeParseMini
                 foreach (AttackType at in abilities.Values)
                 {
                     if (at == null || string.IsNullOrEmpty(at.Type)) continue;
+                    if (string.Equals(at.Type, "All", StringComparison.OrdinalIgnoreCase)) continue;
 
                     ZoneAggregate agg;
                     if (!totals.TryGetValue(at.Type, out agg))
@@ -2407,7 +2448,7 @@ namespace SqueezeParseMini
     {
         // Bump this with every release you push, and keep version.txt in the
         // repo (see VersionCheckUrl below) in sync with it.
-        private const string CurrentVersion = "1.0.3";
+        private const string CurrentVersion = "1.0.4";
 
         // Fill these in with your actual GitHub repo details once it's set up:
         // - VersionCheckUrl should point at a plain text file containing just
@@ -2427,6 +2468,7 @@ namespace SqueezeParseMini
 
         private Button _btnAddWindow;
         private CheckBox _chkUnlockAll;
+        private CheckBox _chkHideAll;
         private GroupBox _generalGroup;
         private Button _btnSaveSettings;
 
@@ -2554,7 +2596,7 @@ namespace SqueezeParseMini
                 AutoSize = true
             };
 
-            // Row 1: Unlock all windows
+            // Row 1: Unlock all windows | Hide all windows
             var row1 = CreateGeneralRow();
             _chkUnlockAll = new CheckBox { Text = "Unlock all windows", AutoSize = true, Margin = new Padding(0, 4, 12, 0) };
             _chkUnlockAll.CheckedChanged += (s, e) =>
@@ -2570,6 +2612,16 @@ namespace SqueezeParseMini
                     _gridOverlay.Hide();
             };
             row1.Controls.Add(_chkUnlockAll);
+
+            _chkHideAll = new CheckBox { Text = "Hide all windows", AutoSize = true, Margin = new Padding(0, 4, 0, 0) };
+            _chkHideAll.CheckedChanged += (s, e) =>
+            {
+                foreach (ParseWindowController w in _windows)
+                {
+                    w.SetForceHidden(_chkHideAll.Checked);
+                }
+            };
+            row1.Controls.Add(_chkHideAll);
             generalRows.Controls.Add(row1);
 
             // Row 2: Save settings | Add parse window
@@ -2696,6 +2748,7 @@ namespace SqueezeParseMini
             var controller = new ParseWindowController(name);
             controller.BuildUI(page);
             controller.Overlay.IsUnlocked = _chkUnlockAll != null && _chkUnlockAll.Checked;
+            controller.SetForceHidden(_chkHideAll != null && _chkHideAll.Checked);
             DarkTheme.Apply(page);
 
             controller.BtnRemoveWindow.Click += (s, e) => RemoveWindow(controller);
